@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/rhaqim/worldgame/internal/external"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/handlers"
 	"github.com/rhaqim/worldgame/internal/models"
@@ -20,21 +19,21 @@ func main() {
 	log.Println("=== WorldGame Server ===")
 	log.Printf("Starting on port %d", *port)
 
-	// Initialize components
-	feeds := external.NewFeedProvider()
-	eventGen := game.NewEventGenerator(feeds)
+	// Initialize components.
+	challengeGen := game.NewChallengeGenerator()
+	evaluator := game.NewEvaluator()
 
-	// Hub will be set after we have the game manager
+	// Hub will be set after we have the game manager.
 	var hub *handlers.Hub
 
-	// The broadcast function bridges the engine to the WebSocket hub
+	// The broadcast function bridges the engine to the WebSocket hub.
 	broadcastFn := func(gameID string, msg models.WSMessage) {
 		if hub != nil {
 			hub.BroadcastToGame(gameID, msg)
 		}
 	}
 
-	engine := game.NewEngine(eventGen, broadcastFn)
+	engine := game.NewEngine(challengeGen, evaluator, broadcastFn)
 	gameManager := game.NewGameManager(engine)
 
 	hub = handlers.NewHub(gameManager)
@@ -42,10 +41,10 @@ func main() {
 
 	apiHandler := handlers.NewAPIHandler(gameManager)
 
-	// Set up gin router
+	// Set up gin router.
 	r := gin.Default()
 
-	// CORS middleware
+	// CORS middleware.
 	r.Use(cors.New(cors.Config{
 		AllowAllOrigins:  true,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -53,18 +52,20 @@ func main() {
 		AllowCredentials: false,
 	}))
 
-	// REST endpoints
+	// REST endpoints.
 	api := r.Group("/api")
 	{
 		api.POST("/games", apiHandler.CreateGame)
 		api.GET("/games", apiHandler.ListGames)
 		api.GET("/games/:id", apiHandler.GetGame)
 		api.POST("/games/:id/join", apiHandler.JoinGame)
-		api.POST("/games/:id/start", apiHandler.StartGame)
+		api.POST("/games/:id/proposals", apiHandler.SubmitProposal)
+		api.POST("/games/:id/evaluate", apiHandler.Evaluate)
+		api.POST("/games/:id/next-week", apiHandler.NextWeek)
 		api.GET("/regions", apiHandler.ListRegions)
 	}
 
-	// WebSocket endpoint - use gorilla/websocket via raw http handler
+	// WebSocket endpoint.
 	r.GET("/ws", func(c *gin.Context) {
 		hub.HandleWebSocket(c.Writer, c.Request)
 	})

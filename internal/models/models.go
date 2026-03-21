@@ -2,131 +2,144 @@ package models
 
 import "time"
 
-type SectorType string
+// Tag represents a topic category for challenges.
+type Tag string
 
 const (
-	Economics SectorType = "economics"
-	Politics  SectorType = "politics"
-	Security  SectorType = "security"
-	Education SectorType = "education"
-	RandD     SectorType = "randd"
+	TagEconomics Tag = "economics"
+	TagPolitics  Tag = "politics"
+	TagSecurity  Tag = "security"
+	TagEducation Tag = "education"
+	TagLaw       Tag = "law"
 )
 
-var AllSectors = []SectorType{Economics, Politics, Security, Education, RandD}
+// AllTags contains every valid tag.
+var AllTags = []Tag{TagEconomics, TagPolitics, TagSecurity, TagEducation, TagLaw}
 
+// IsValidTag returns true if the given tag is one of the known tags.
+func IsValidTag(t Tag) bool {
+	for _, valid := range AllTags {
+		if t == valid {
+			return true
+		}
+	}
+	return false
+}
+
+// GamePhase represents the current phase of a game week.
 type GamePhase string
 
 const (
-	PhaseLobby    GamePhase = "lobby"
-	PhasePlaying  GamePhase = "playing"
-	PhaseFinished GamePhase = "finished"
+	PhaseActive     GamePhase = "active"
+	PhaseEvaluating GamePhase = "evaluating"
+	PhaseCompleted  GamePhase = "completed"
 )
 
-type ActionType string
-
-const (
-	ActionAllocate     ActionType = "allocate"
-	ActionPolicy       ActionType = "policy"
-	ActionTrade        ActionType = "trade"
-	ActionRespondEvent ActionType = "respond_event"
-)
-
-type Resources struct {
-	Budget    float64 `json:"budget"`
-	Influence float64 `json:"influence"`
-	Stability float64 `json:"stability"`
-	Knowledge float64 `json:"knowledge"`
-}
-
-type SectorState struct {
-	Level      float64 `json:"level"`
-	Investment float64 `json:"investment"`
-	Growth     float64 `json:"growth"`
-}
-
+// Player represents a participant in a game.
 type Player struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	RegionID  string    `json:"region_id"`
-	Resources Resources `json:"resources"`
-	Ready     bool      `json:"ready"`
-	Connected bool      `json:"connected"`
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Points     float64 `json:"points"`      // available points this week (starts at 100)
+	TotalScore float64 `json:"total_score"` // cumulative across weeks
+	Connected  bool    `json:"connected"`
 }
 
-type PlayerState struct {
-	Player      Player                      `json:"player"`
-	Sectors     map[SectorType]*SectorState `json:"sectors"`
-	Score       float64                     `json:"score"`
-	TurnActions []Action                    `json:"turn_actions"`
-}
-
+// Region represents a geographical area that a game is set in.
 type Region struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name"`
-	Country     string                 `json:"country"`
-	Continent   string                 `json:"continent"`
-	BaseStats   map[SectorType]float64 `json:"base_stats"`
-	Description string                 `json:"description"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Country     string `json:"country"`
+	Continent   string `json:"continent"`
+	Description string `json:"description"`
 }
 
-type WorldEvent struct {
-	ID              string                 `json:"id"`
-	Title           string                 `json:"title"`
-	Description     string                 `json:"description"`
-	Source          string                 `json:"source"`
-	AffectedSectors []SectorType           `json:"affected_sectors"`
-	Impact          map[SectorType]float64 `json:"impact"`
-	Duration        int                    `json:"duration"`
-	RegionSpecific  string                 `json:"region_specific"`
+// Challenge represents a problem generated from feeds that players must solve.
+type Challenge struct {
+	ID          string    `json:"id"`
+	Tag         Tag       `json:"tag"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Source      string    `json:"source"`     // "news", "social_media", "report"
+	Region      string    `json:"region"`     // region name
+	Severity    int       `json:"severity"`   // 1-10
+	CreatedAt   time.Time `json:"created_at"`
+	Active      bool      `json:"active"`
 }
 
+// Proposal represents a player's submitted solution to a challenge.
+type Proposal struct {
+	ID             string    `json:"id"`
+	PlayerID       string    `json:"player_id"`
+	PlayerName     string    `json:"player_name"`
+	ChallengeID    string    `json:"challenge_id"`
+	Description    string    `json:"description"`     // the player's proposed solution
+	PointsInvested float64   `json:"points_invested"`
+	SubmittedAt    time.Time `json:"submitted_at"`
+	AIScore        float64   `json:"ai_score"`    // 0 until evaluated
+	AIFeedback     string    `json:"ai_feedback"` // empty until evaluated
+}
+
+// WeekWinner holds the result of a weekly evaluation.
+type WeekWinner struct {
+	PlayerID   string  `json:"player_id"`
+	PlayerName string  `json:"player_name"`
+	Score      float64 `json:"score"`
+	Summary    string  `json:"summary"`
+}
+
+// Game is the top-level game state.
 type Game struct {
-	ID           string                  `json:"id"`
-	Name         string                  `json:"name"`
-	MaxPlayers   int                     `json:"max_players"`
-	Players      map[string]*PlayerState `json:"players"`
-	Phase        GamePhase               `json:"phase"`
-	CurrentTurn  int                     `json:"current_turn"`
-	MaxTurns     int                     `json:"max_turns"`
-	Events       []WorldEvent            `json:"events"`
-	ActiveEvents []WorldEvent            `json:"active_events"`
-	CreatedAt    time.Time               `json:"created_at"`
-	HostID       string                  `json:"host_id"`
+	ID         string             `json:"id"`
+	Name       string             `json:"name"`
+	RegionID   string             `json:"region_id"`
+	RegionName string             `json:"region_name"`
+	Tags       []Tag              `json:"tags"`
+	Phase      GamePhase          `json:"phase"`
+	Players    map[string]*Player `json:"players"`
+	Challenges []Challenge        `json:"challenges"`
+	Proposals  []Proposal         `json:"proposals"`
+	WeekNumber int                `json:"week_number"`
+	WeekStart  time.Time          `json:"week_start"`
+	WeekEnd    time.Time          `json:"week_end"`
+	HostID     string             `json:"host_id"`
+	CreatedAt  time.Time          `json:"created_at"`
+	Winner     *WeekWinner        `json:"winner,omitempty"`
 }
 
-type Action struct {
-	Type     ActionType             `json:"type"`
-	PlayerID string                 `json:"player_id"`
-	Data     map[string]interface{} `json:"data"`
-}
-
-type WSMessage struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload"`
+// GameSummary is a lightweight representation for listing games.
+type GameSummary struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	RegionName  string    `json:"region_name"`
+	Tags        []Tag     `json:"tags"`
+	Phase       GamePhase `json:"phase"`
+	PlayerCount int       `json:"player_count"`
+	WeekNumber  int       `json:"week_number"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // CreateGameRequest is the body for POST /api/games.
-// Only creates the game shell -- no player is added.
 type CreateGameRequest struct {
-	Name       string `json:"name"`
-	MaxPlayers int    `json:"max_players"`
-	MaxTurns   int    `json:"max_turns"`
+	Name     string `json:"name"`
+	RegionID string `json:"region_id"`
+	Tags     []Tag  `json:"tags"`
 }
 
 // JoinGameRequest is the body for POST /api/games/:id/join.
 type JoinGameRequest struct {
 	PlayerName string `json:"player_name"`
-	RegionID   string `json:"region_id"`
 }
 
-// GameSummary is returned in the list-games endpoint.
-type GameSummary struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Phase       GamePhase `json:"phase"`
-	PlayerCount int       `json:"player_count"`
-	MaxPlayers  int       `json:"max_players"`
-	MaxTurns    int       `json:"max_turns"`
-	CurrentTurn int       `json:"current_turn"`
-	CreatedAt   time.Time `json:"created_at"`
+// SubmitProposalRequest is the body for POST /api/games/:id/proposals.
+type SubmitProposalRequest struct {
+	PlayerID       string  `json:"player_id"`
+	ChallengeID    string  `json:"challenge_id"`
+	Description    string  `json:"description"`
+	PointsInvested float64 `json:"points_invested"`
+}
+
+// WSMessage is the envelope for all WebSocket communication.
+type WSMessage struct {
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
 }

@@ -8,6 +8,12 @@ import (
 	"github.com/rhaqim/worldgame/internal/models"
 )
 
+// errorf is a convenience wrapper around fmt.Errorf used throughout the
+// game package.
+func errorf(format string, args ...interface{}) error {
+	return fmt.Errorf(format, args...)
+}
+
 // GameManager is the thread-safe in-memory store for all active games.
 type GameManager struct {
 	mu     sync.RWMutex
@@ -16,6 +22,7 @@ type GameManager struct {
 	nextID int
 }
 
+// NewGameManager creates a new GameManager backed by the given engine.
 func NewGameManager(engine *Engine) *GameManager {
 	return &GameManager{
 		games:  make(map[string]*models.Game),
@@ -28,98 +35,76 @@ func (gm *GameManager) generateID() string {
 	return fmt.Sprintf("game_%d_%d", time.Now().Unix(), gm.nextID)
 }
 
-// CreateGame creates a new game in lobby phase with NO players.
+// CreateGame creates a new game, generates initial challenges, and puts it
+// in the active phase. The creator does NOT automatically become a player.
 func (gm *GameManager) CreateGame(req models.CreateGameRequest) (*models.Game, error) {
+	// Validate region.
+	region := GetRegionByID(req.RegionID)
+	if region == nil {
+		return nil, errorf("invalid region_id: %s", req.RegionID)
+	}
+
+	// Validate tags.
+	if len(req.Tags) == 0 {
+		return nil, errorf("at least one tag is required")
+	}
+	for _, t := range req.Tags {
+		if !models.IsValidTag(t) {
+			return nil, errorf("invalid tag: %s", t)
+		}
+	}
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	gameID := gm.generateID()
 
-	maxTurns := req.MaxTurns
-	if maxTurns <= 0 {
-		maxTurns = 30
-	}
-
-	maxPlayers := req.MaxPlayers
-	if maxPlayers <= 0 {
-		maxPlayers = 4
-	}
-	if maxPlayers < 2 {
-		maxPlayers = 2
-	}
-	if maxPlayers > 6 {
-		maxPlayers = 6
-	}
-
 	g := &models.Game{
-		ID:           gameID,
-		Name:         req.Name,
-		MaxPlayers:   maxPlayers,
-		Players:      make(map[string]*models.PlayerState),
-		Phase:        models.PhaseLobby,
-		CurrentTurn:  0,
-		MaxTurns:     maxTurns,
-		Events:       []models.WorldEvent{},
-		ActiveEvents: []models.WorldEvent{},
-		CreatedAt:    time.Now(),
-		HostID:       "", // no host until a player joins
+		ID:         gameID,
+		Name:       req.Name,
+		RegionID:   region.ID,
+		RegionName: region.Name,
+		Tags:       req.Tags,
+		Phase:      models.PhaseActive,
+		Players:    make(map[string]*models.Player),
+		Challenges: []models.Challenge{},
+		Proposals:  []models.Proposal{},
+		WeekNumber: 0, // InitializeGame will set to 1
+		HostID:     "",
+		CreatedAt:  time.Now(),
 	}
+
+	// Engine sets up week timing, generates challenges, etc.
+	gm.engine.InitializeGame(g)
 
 	gm.games[gameID] = g
 	return g, nil
 }
 
-// JoinGame adds a player to an existing game in lobby phase.
-// The first player to join becomes the host.
+// JoinGame adds a player to an existing game. The first player to join
+// becomes the host. No region selection -- everyone plays in the game's region.
 func (gm *GameManager) JoinGame(gameID string, req models.JoinGameRequest) (*models.Game, string, error) {
-	region := GetRegionByID(req.RegionID)
-	if region == nil {
-		return nil, "", fmt.Errorf("invalid region ID: %s", req.RegionID)
-	}
-
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	game, ok := gm.games[gameID]
 	if !ok {
-		return nil, "", fmt.Errorf("game not found")
-	}
-
-	if game.Phase != models.PhaseLobby {
-		return nil, "", fmt.Errorf("game is not accepting new players")
-	}
-
-	if len(game.Players) >= game.MaxPlayers {
-		return nil, "", fmt.Errorf("game is full (max %d players)", game.MaxPlayers)
-	}
-
-	// Check if region is already taken
-	for _, ps := range game.Players {
-		if ps.Player.RegionID == req.RegionID {
-			return nil, "", fmt.Errorf("region %s is already taken", req.RegionID)
-		}
+		return nil, "", errorf("game not found")
 	}
 
 	playerID := fmt.Sprintf("player_%d_%d", time.Now().UnixNano(), len(game.Players))
 
-	player := models.Player{
-		ID:        playerID,
-		Name:      req.PlayerName,
-		RegionID:  req.RegionID,
-		Resources: models.Resources{},
-		Ready:     false,
-		Connected: false,
+	player := &models.Player{
+		ID:         playerID,
+		Name:       req.PlayerName,
+		Points:     InitialPlayerPoints,
+		TotalScore: 0,
+		Connected:  false,
 	}
 
-	playerState := &models.PlayerState{
-		Player:  player,
-		Sectors: make(map[models.SectorType]*models.SectorState),
-		Score:   0,
-	}
+	game.Players[playerID] = player
 
-	game.Players[playerID] = playerState
-
-	// First player to join becomes the host
+	// First player to join becomes the host.
 	if game.HostID == "" {
 		game.HostID = playerID
 	}
@@ -127,21 +112,55 @@ func (gm *GameManager) JoinGame(gameID string, req models.JoinGameRequest) (*mod
 	return game, playerID, nil
 }
 
-// StartGame transitions the game from lobby to playing.
-func (gm *GameManager) StartGame(gameID, playerID string) error {
+// SubmitProposal delegates to the engine for proposal validation and recording.
+func (gm *GameManager) SubmitProposal(gameID string, req models.SubmitProposalRequest) (*models.Proposal, error) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
 	game, ok := gm.games[gameID]
 	if !ok {
-		return fmt.Errorf("game not found")
+		return nil, errorf("game not found")
 	}
 
-	if game.HostID != playerID {
-		return fmt.Errorf("only the host can start the game")
+	if game.Phase != models.PhaseActive {
+		return nil, errorf("game is not in active phase")
 	}
 
-	return gm.engine.StartGame(game)
+	return gm.engine.SubmitProposal(game, req)
+}
+
+// Evaluate triggers AI evaluation for the game (host only).
+func (gm *GameManager) Evaluate(gameID, playerID string) (*models.Game, error) {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+
+	game, ok := gm.games[gameID]
+	if !ok {
+		return nil, errorf("game not found")
+	}
+
+	if err := gm.engine.Evaluate(game, playerID); err != nil {
+		return nil, err
+	}
+
+	return game, nil
+}
+
+// NextWeek starts the next week cycle (host only).
+func (gm *GameManager) NextWeek(gameID, playerID string) (*models.Game, error) {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+
+	game, ok := gm.games[gameID]
+	if !ok {
+		return nil, errorf("game not found")
+	}
+
+	if err := gm.engine.NextWeek(game, playerID); err != nil {
+		return nil, err
+	}
+
+	return game, nil
 }
 
 // GetGame returns a game by ID.
@@ -151,7 +170,7 @@ func (gm *GameManager) GetGame(gameID string) (*models.Game, error) {
 
 	game, ok := gm.games[gameID]
 	if !ok {
-		return nil, fmt.Errorf("game not found")
+		return nil, errorf("game not found")
 	}
 	return game, nil
 }
@@ -161,49 +180,23 @@ func (gm *GameManager) ListGames() []models.GameSummary {
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
 
-	summaries := make([]models.GameSummary, 0)
+	summaries := make([]models.GameSummary, 0, len(gm.games))
 	for _, g := range gm.games {
 		summaries = append(summaries, models.GameSummary{
 			ID:          g.ID,
 			Name:        g.Name,
+			RegionName:  g.RegionName,
+			Tags:        g.Tags,
 			Phase:       g.Phase,
 			PlayerCount: len(g.Players),
-			MaxPlayers:  g.MaxPlayers,
-			MaxTurns:    g.MaxTurns,
-			CurrentTurn: g.CurrentTurn,
+			WeekNumber:  g.WeekNumber,
 			CreatedAt:   g.CreatedAt,
 		})
 	}
 	return summaries
 }
 
-// SubmitAction records a player action in the game.
-func (gm *GameManager) SubmitAction(gameID string, action models.Action) error {
-	gm.mu.Lock()
-	defer gm.mu.Unlock()
-
-	game, ok := gm.games[gameID]
-	if !ok {
-		return fmt.Errorf("game not found")
-	}
-
-	return gm.engine.SubmitAction(game, action)
-}
-
-// SetPlayerReady marks a player as ready and processes the turn if all ready.
-func (gm *GameManager) SetPlayerReady(gameID, playerID string) (bool, error) {
-	gm.mu.Lock()
-	defer gm.mu.Unlock()
-
-	game, ok := gm.games[gameID]
-	if !ok {
-		return false, fmt.Errorf("game not found")
-	}
-
-	return gm.engine.SetPlayerReady(game, playerID)
-}
-
-// SetPlayerConnected updates the connected status of a player.
+// SetPlayerConnected updates a player's connected status.
 func (gm *GameManager) SetPlayerConnected(gameID, playerID string, connected bool) {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
@@ -213,10 +206,10 @@ func (gm *GameManager) SetPlayerConnected(gameID, playerID string, connected boo
 		return
 	}
 
-	ps, ok := game.Players[playerID]
+	player, ok := game.Players[playerID]
 	if !ok {
 		return
 	}
 
-	ps.Player.Connected = connected
+	player.Connected = connected
 }

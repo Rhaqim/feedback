@@ -1,163 +1,127 @@
 package external
 
 import (
-	"fmt"
 	"math/rand"
 	"time"
 )
 
-type NewsItem struct {
+// FeedItem represents a single item from an external feed source.
+type FeedItem struct {
 	Headline  string  `json:"headline"`
-	Source    string  `json:"source"`
+	Source    string  `json:"source"`    // "news", "social_media", "report"
 	Sentiment float64 `json:"sentiment"` // -1.0 to 1.0
-	Category string  `json:"category"`
+	Tag       string  `json:"tag"`
+	Region    string  `json:"region"`
 }
 
-type SocialTrend struct {
-	Topic      string  `json:"topic"`
-	Engagement float64 `json:"engagement"` // 0-100
-	Sentiment  float64 `json:"sentiment"`
-	Region     string  `json:"region"`
-}
-
-type EconomicIndicator struct {
-	Name   string  `json:"name"`
-	Value  float64 `json:"value"`
-	Change float64 `json:"change"` // percentage change
-	Region string  `json:"region"`
-}
-
-var newsHeadlines = []struct {
+// tagHeadlines provides mock feed data per tag that can be used
+// to contextualise challenge generation.
+var tagHeadlines = map[string][]struct {
 	headline  string
-	category  string
+	source    string
 	sentiment float64
 }{
-	{"Global Markets Rally on Trade Optimism", "economics", 0.7},
-	{"Tensions Rise Over Disputed Territory", "security", -0.6},
-	{"Breakthrough in Quantum Computing Announced", "randd", 0.9},
-	{"Education Reform Bill Passes Parliament", "education", 0.5},
-	{"Opposition Party Gains Ground in Polls", "politics", -0.2},
-	{"Oil Prices Surge After Supply Disruption", "economics", -0.4},
-	{"New Cybersecurity Threat Targets Infrastructure", "security", -0.8},
-	{"University Opens Largest AI Research Lab", "randd", 0.8},
-	{"Literacy Rates Hit All-Time High", "education", 0.9},
-	{"Diplomatic Summit Yields Historic Agreement", "politics", 0.8},
-	{"Central Bank Raises Interest Rates", "economics", -0.3},
-	{"Peacekeeping Forces Deploy to Conflict Zone", "security", 0.3},
-	{"Space Agency Announces Mars Mission Timeline", "randd", 0.7},
-	{"Student Protests Demand Curriculum Changes", "education", -0.2},
-	{"Corruption Scandal Rocks Ruling Party", "politics", -0.9},
-	{"Tech Giant Reports Record Quarterly Earnings", "economics", 0.6},
-	{"Border Patrol Intercepts Smuggling Network", "security", 0.4},
-	{"Clinical Trials Show Promise for New Vaccine", "randd", 0.8},
-	{"Teacher Shortage Reaches Critical Levels", "education", -0.7},
-	{"International Sanctions Imposed on Regime", "politics", -0.5},
-	{"Cryptocurrency Market Experiences Flash Crash", "economics", -0.6},
-	{"Cyber Attack Disrupts National Power Grid", "security", -0.9},
-	{"Renewable Energy Breakthrough Cuts Costs by 40%", "randd", 0.9},
-	{"STEM Scholarship Program Expands Nationwide", "education", 0.7},
-	{"Coalition Government Formed After Deadlock", "politics", 0.3},
+	"security": {
+		{"Ransomware Attack Cripples Hospital Network", "news", -0.8},
+		{"Border Patrol Intercepts Record Smuggling Haul", "news", 0.3},
+		{"Data Breach Exposes Millions of Citizen Records", "news", -0.9},
+		{"New Cybersecurity Task Force Announced", "report", 0.6},
+		{"Extremist Propaganda Spreads on Social Platforms", "social_media", -0.7},
+		{"Critical Infrastructure Audit Reveals Gaps", "report", -0.5},
+		{"Intelligence Sharing Agreement Signed", "news", 0.7},
+		{"Drone Surveillance Raises Privacy Concerns", "social_media", -0.3},
+	},
+	"politics": {
+		{"Corruption Probe Targets Senior Officials", "news", -0.7},
+		{"Youth Voter Turnout Hits Record Highs", "social_media", 0.5},
+		{"Opposition Calls for Snap Election", "news", -0.4},
+		{"Government Transparency Report Released", "report", 0.3},
+		{"Diplomatic Rift Deepens Over Trade Policy", "news", -0.6},
+		{"Constitutional Amendment Proposed", "news", 0.2},
+		{"Grassroots Movement Gains Momentum", "social_media", 0.6},
+		{"Policy Gridlock Stalls Critical Legislation", "report", -0.5},
+	},
+	"economics": {
+		{"Inflation Reaches Multi-Year High", "report", -0.7},
+		{"Central Bank Signals Rate Hike", "news", -0.3},
+		{"Startup Funding Round Breaks Records", "news", 0.8},
+		{"Unemployment Claims Surge Amid Layoffs", "report", -0.8},
+		{"Trade Surplus Narrows as Imports Rise", "report", -0.4},
+		{"Housing Prices Soar Beyond Reach", "social_media", -0.6},
+		{"Manufacturing Sector Shows Recovery Signs", "news", 0.5},
+		{"Foreign Direct Investment Flows Increase", "report", 0.6},
+	},
+	"education": {
+		{"Schools Struggle With Teacher Shortages", "news", -0.6},
+		{"Digital Learning Platform Launches Nationwide", "news", 0.7},
+		{"University Rankings Show Surprising Shifts", "report", 0.3},
+		{"Student Loan Debt Crisis Deepens", "social_media", -0.7},
+		{"STEM Scholarship Program Expands", "news", 0.6},
+		{"Rural Schools Face Connectivity Gap", "report", -0.5},
+		{"Brain Drain Accelerates Among Graduates", "news", -0.8},
+		{"Research Funding Cuts Threaten Innovation", "report", -0.6},
+	},
+	"law": {
+		{"Court Backlog Leaves Thousands Waiting for Justice", "report", -0.7},
+		{"New Data Privacy Legislation Introduced", "news", 0.5},
+		{"Human Rights Report Criticises Detention Conditions", "report", -0.8},
+		{"IP Theft Cases Surge in Tech Sector", "news", -0.5},
+		{"Judicial Reform Bill Gains Bipartisan Support", "news", 0.6},
+		{"Regulatory Framework for AI Proposed", "report", 0.4},
+		{"Legal Aid Funding Slashed", "social_media", -0.6},
+		{"Constitutional Court Rules on Digital Rights", "news", 0.3},
+	},
 }
 
-var trendingTopics = []struct {
-	topic    string
-	category string
-}{
-	{"#ClimateAction", "politics"},
-	{"#TechInnovation", "randd"},
-	{"#EconomicRecovery", "economics"},
-	{"#EducationMatters", "education"},
-	{"#CyberSecurity", "security"},
-	{"#TradeWar", "economics"},
-	{"#SpaceExploration", "randd"},
-	{"#ElectionDay", "politics"},
-	{"#OnlineLearning", "education"},
-	{"#MilitarySpending", "security"},
-}
-
-var economicIndicators = []string{
-	"GDP Growth Rate",
-	"Unemployment Rate",
-	"Inflation Rate",
-	"Trade Balance",
-	"Consumer Confidence Index",
-	"Manufacturing PMI",
-	"Foreign Direct Investment",
-	"Stock Market Index",
-}
-
+// FeedProvider generates mock external feed data for contextualising
+// challenge generation.
 type FeedProvider struct {
 	rng *rand.Rand
 }
 
+// NewFeedProvider creates a new FeedProvider.
 func NewFeedProvider() *FeedProvider {
 	return &FeedProvider{
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
-func (f *FeedProvider) GetNewsItems(count int) []NewsItem {
-	items := make([]NewsItem, 0, count)
-	sources := []string{"World Times", "Global Herald", "The Observer", "News Network", "Daily Report"}
+// GetFeedItems returns mock feed items for a specific tag and region.
+func (f *FeedProvider) GetFeedItems(tag string, region string, count int) []FeedItem {
+	headlines, ok := tagHeadlines[tag]
+	if !ok {
+		return nil
+	}
 
+	items := make([]FeedItem, 0, count)
 	for i := 0; i < count; i++ {
-		idx := f.rng.Intn(len(newsHeadlines))
-		h := newsHeadlines[idx]
-		items = append(items, NewsItem{
+		idx := f.rng.Intn(len(headlines))
+		h := headlines[idx]
+		items = append(items, FeedItem{
 			Headline:  h.headline,
-			Source:    sources[f.rng.Intn(len(sources))],
-			Sentiment: h.sentiment + (f.rng.Float64()-0.5)*0.2, // add noise
-			Category:  h.category,
+			Source:    h.source,
+			Sentiment: h.sentiment + (f.rng.Float64()-0.5)*0.2,
+			Tag:       tag,
+			Region:    region,
 		})
 	}
 	return items
 }
 
-func (f *FeedProvider) GetSocialTrends(count int, regionID string) []SocialTrend {
-	trends := make([]SocialTrend, 0, count)
-	for i := 0; i < count; i++ {
-		idx := f.rng.Intn(len(trendingTopics))
-		t := trendingTopics[idx]
-		trends = append(trends, SocialTrend{
-			Topic:      t.topic,
-			Engagement: 20 + f.rng.Float64()*80,
-			Sentiment:  (f.rng.Float64() * 2) - 1,
-			Region:     regionID,
-		})
-	}
-	return trends
-}
-
-func (f *FeedProvider) GetEconomicIndicators(regionID string) []EconomicIndicator {
-	indicators := make([]EconomicIndicator, 0, len(economicIndicators))
-	for _, name := range economicIndicators {
-		indicators = append(indicators, EconomicIndicator{
-			Name:   name,
-			Value:  f.rng.Float64() * 100,
-			Change: (f.rng.Float64() * 10) - 5,
-			Region: regionID,
-		})
-	}
-	return indicators
-}
-
-// GenerateEventContext produces a summary of current feed data that the event
-// generator can use to pick contextually relevant events.
-func (f *FeedProvider) GenerateEventContext() map[string]float64 {
-	news := f.GetNewsItems(5)
-	avgSentiment := 0.0
-	categoryCounts := map[string]int{}
-	for _, n := range news {
-		avgSentiment += n.Sentiment
-		categoryCounts[n.Category]++
-	}
-	avgSentiment /= float64(len(news))
-
-	context := map[string]float64{
-		"news_sentiment": avgSentiment,
-	}
-	for cat, count := range categoryCounts {
-		context[fmt.Sprintf("news_%s_count", cat)] = float64(count)
+// GetFeedContext returns aggregated sentiment data across all tags for a
+// region. This can be used by challenge generators to weight severity.
+func (f *FeedProvider) GetFeedContext(region string) map[string]float64 {
+	context := make(map[string]float64)
+	for tag := range tagHeadlines {
+		items := f.GetFeedItems(tag, region, 3)
+		avgSentiment := 0.0
+		for _, item := range items {
+			avgSentiment += item.Sentiment
+		}
+		if len(items) > 0 {
+			avgSentiment /= float64(len(items))
+		}
+		context[tag+"_sentiment"] = avgSentiment
 	}
 	return context
 }

@@ -1,382 +1,200 @@
 package game
 
 import (
-	"fmt"
 	"log"
-	"math"
+	"time"
 
 	"github.com/rhaqim/worldgame/internal/models"
 )
 
 const (
-	WinScore       = 400.0
-	MaxScore       = 500.0
-	DecayRate      = 1.5 // sectors lose this much per turn if not invested
-	InvestmentRate = 0.5 // multiplier: budget spent → sector level gain
-	MaxSectorLevel = 100.0
-	MinSectorLevel = 0.0
+	WeekDuration       = 7 * 24 * time.Hour
+	InitialPlayerPoints = 100.0
+	ChallengesPerTag   = 3 // generate 2-3 per tag; we use 3 for the prototype
 )
 
-// BroadcastFunc is called by the engine whenever it needs to push state to clients.
+// BroadcastFunc is called by the engine whenever it needs to push state to
+// connected WebSocket clients.
 type BroadcastFunc func(gameID string, msg models.WSMessage)
 
+// Engine orchestrates the weekly game cycle: challenge generation, proposal
+// submission, AI evaluation, and week transitions.
 type Engine struct {
-	eventGen  *EventGenerator
-	broadcast BroadcastFunc
+	challengeGen *ChallengeGenerator
+	evaluator    *Evaluator
+	broadcast    BroadcastFunc
 }
 
-func NewEngine(eventGen *EventGenerator, broadcast BroadcastFunc) *Engine {
+// NewEngine creates a new Engine with the given challenge generator,
+// evaluator, and broadcast function.
+func NewEngine(challengeGen *ChallengeGenerator, evaluator *Evaluator, broadcast BroadcastFunc) *Engine {
 	return &Engine{
-		eventGen:  eventGen,
-		broadcast: broadcast,
+		challengeGen: challengeGen,
+		evaluator:    evaluator,
+		broadcast:    broadcast,
 	}
 }
 
-// StartGame transitions a game from lobby to playing phase.
-func (e *Engine) StartGame(g *models.Game) error {
-	if g.Phase != models.PhaseLobby {
-		return fmt.Errorf("game is not in lobby phase")
-	}
-	if len(g.Players) < 2 {
-		return fmt.Errorf("need at least 2 players to start")
-	}
+// InitializeGame sets up a newly created game: generates initial challenges,
+// sets the week window, and moves the game to active phase.
+func (e *Engine) InitializeGame(g *models.Game) {
+	now := time.Now()
+	g.Phase = models.PhaseActive
+	g.WeekNumber = 1
+	g.WeekStart = now
+	g.WeekEnd = now.Add(WeekDuration)
+	g.Challenges = e.challengeGen.GenerateChallenges(g, ChallengesPerTag)
+	g.Proposals = []models.Proposal{}
+	g.Winner = nil
 
-	g.Phase = models.PhasePlaying
-	g.CurrentTurn = 1
+	log.Printf("[Engine] Game %s initialized with %d challenges", g.ID, len(g.Challenges))
+}
 
-	// Initialize player sectors from region base stats
-	for _, ps := range g.Players {
-		region := GetRegionByID(ps.Player.RegionID)
-		if region == nil {
-			continue
-		}
-		ps.Sectors = make(map[models.SectorType]*models.SectorState)
-		for _, s := range models.AllSectors {
-			base := region.BaseStats[s]
-			ps.Sectors[s] = &models.SectorState{
-				Level:      base,
-				Investment: 0,
-				Growth:     1.0,
-			}
-		}
-		ps.Player.Resources = models.Resources{
-			Budget:    100,
-			Influence: 50,
-			Stability: 70,
-			Knowledge: 40,
-		}
-		ps.Score = e.calcScore(ps)
+// SubmitProposal validates and records a player's proposal for a challenge.
+// It deducts the invested points from the player and broadcasts the proposal.
+func (e *Engine) SubmitProposal(g *models.Game, req models.SubmitProposalRequest) (*models.Proposal, error) {
+	player, ok := g.Players[req.PlayerID]
+	if !ok {
+		return nil, errorf("player %s not found in game", req.PlayerID)
 	}
 
-	// Generate initial events
-	initialEvents := e.eventGen.GenerateEvents(g, 2)
-	g.ActiveEvents = initialEvents
-	g.Events = append(g.Events, initialEvents...)
+	// Find the challenge.
+	var challenge *models.Challenge
+	for i := range g.Challenges {
+		if g.Challenges[i].ID == req.ChallengeID {
+			challenge = &g.Challenges[i]
+			break
+		}
+	}
+	if challenge == nil {
+		return nil, errorf("challenge %s not found", req.ChallengeID)
+	}
+	if !challenge.Active {
+		return nil, errorf("challenge %s is no longer active", req.ChallengeID)
+	}
 
-	log.Printf("[Engine] Game %s started with %d players", g.ID, len(g.Players))
+	if req.PointsInvested <= 0 {
+		return nil, errorf("points_invested must be greater than 0")
+	}
+	if player.Points < req.PointsInvested {
+		return nil, errorf("insufficient points: have %.1f, need %.1f", player.Points, req.PointsInvested)
+	}
+	if req.Description == "" {
+		return nil, errorf("description is required")
+	}
 
+	// Deduct points.
+	player.Points -= req.PointsInvested
+
+	proposal := models.Proposal{
+		ID:             generateProposalID(g.ID, req.PlayerID),
+		PlayerID:       req.PlayerID,
+		PlayerName:     player.Name,
+		ChallengeID:    req.ChallengeID,
+		Description:    req.Description,
+		PointsInvested: req.PointsInvested,
+		SubmittedAt:    time.Now(),
+		AIScore:        0,
+		AIFeedback:     "",
+	}
+
+	g.Proposals = append(g.Proposals, proposal)
+
+	// Broadcast the new proposal to all connected players.
+	e.broadcast(g.ID, models.WSMessage{
+		Type:    "proposal_submitted",
+		Payload: proposal,
+	})
+
+	log.Printf("[Engine] Player %s submitted proposal for challenge %s in game %s (%.1f points invested)",
+		req.PlayerID, req.ChallengeID, g.ID, req.PointsInvested)
+
+	return &proposal, nil
+}
+
+// Evaluate runs the AI evaluator on all proposals, determines the winner,
+// and transitions the game to the completed phase.
+func (e *Engine) Evaluate(g *models.Game, requestingPlayerID string) error {
+	if g.HostID != requestingPlayerID {
+		return errorf("only the host can trigger evaluation")
+	}
+	if g.Phase != models.PhaseActive {
+		return errorf("game must be in active phase to evaluate")
+	}
+
+	g.Phase = models.PhaseEvaluating
+
+	winner := e.evaluator.EvaluateProposals(g)
+	g.Winner = winner
+
+	// Add winning score to the winner's total.
+	if winner != nil {
+		if p, ok := g.Players[winner.PlayerID]; ok {
+			p.TotalScore += winner.Score
+		}
+	}
+
+	g.Phase = models.PhaseCompleted
+
+	// Broadcast evaluation results.
+	e.broadcast(g.ID, models.WSMessage{
+		Type: "evaluation_result",
+		Payload: map[string]interface{}{
+			"winner":    winner,
+			"proposals": g.Proposals,
+		},
+	})
+
+	// Broadcast updated game state.
 	e.broadcastGameState(g)
-	e.broadcastEvents(g, initialEvents)
 
+	log.Printf("[Engine] Game %s week %d evaluated. Winner: %v", g.ID, g.WeekNumber, winner)
 	return nil
 }
 
-// SubmitAction records a player action for the current turn.
-func (e *Engine) SubmitAction(g *models.Game, action models.Action) error {
-	if g.Phase != models.PhasePlaying {
-		return fmt.Errorf("game is not in playing phase")
+// NextWeek resets the game for a new weekly cycle. The game must be in the
+// completed phase. Player points are reset, proposals cleared, new challenges
+// generated, and cumulative total_score is preserved.
+func (e *Engine) NextWeek(g *models.Game, requestingPlayerID string) error {
+	if g.HostID != requestingPlayerID {
+		return errorf("only the host can start the next week")
+	}
+	if g.Phase != models.PhaseCompleted {
+		return errorf("game must be in completed phase to start next week")
 	}
 
-	ps, ok := g.Players[action.PlayerID]
-	if !ok {
-		return fmt.Errorf("player %s not in game", action.PlayerID)
-	}
+	// Reset for new week.
+	g.Phase = models.PhaseActive
+	g.WeekNumber++
+	now := time.Now()
+	g.WeekStart = now
+	g.WeekEnd = now.Add(WeekDuration)
+	g.Winner = nil
 
-	ps.TurnActions = append(ps.TurnActions, action)
-	log.Printf("[Engine] Player %s submitted action %s in game %s", action.PlayerID, action.Type, g.ID)
-	return nil
-}
-
-// SetPlayerReady marks a player as ready. If all players are ready, process the turn.
-func (e *Engine) SetPlayerReady(g *models.Game, playerID string) (bool, error) {
-	if g.Phase != models.PhasePlaying {
-		return false, fmt.Errorf("game is not in playing phase")
-	}
-
-	ps, ok := g.Players[playerID]
-	if !ok {
-		return false, fmt.Errorf("player %s not in game", playerID)
-	}
-
-	ps.Player.Ready = true
-	log.Printf("[Engine] Player %s is ready in game %s", playerID, g.ID)
-
-	// Check if all connected players are ready
-	allReady := true
+	// Reset player points.
 	for _, p := range g.Players {
-		if p.Player.Connected && !p.Player.Ready {
-			allReady = false
-			break
-		}
+		p.Points = InitialPlayerPoints
 	}
 
-	if allReady {
-		e.ProcessTurn(g)
-		return true, nil
-	}
-	return false, nil
-}
+	// Clear old proposals.
+	g.Proposals = []models.Proposal{}
 
-// ProcessTurn handles end-of-turn logic.
-func (e *Engine) ProcessTurn(g *models.Game) {
-	log.Printf("[Engine] Processing turn %d for game %s", g.CurrentTurn, g.ID)
+	// Generate new challenges.
+	g.Challenges = e.challengeGen.GenerateChallenges(g, ChallengesPerTag)
 
-	// 1. Apply player allocations
-	for _, ps := range g.Players {
-		e.applyAllocations(ps)
-	}
+	// Broadcast new state.
+	e.broadcastGameState(g)
 
-	// 2. Apply active events
-	e.applyActiveEvents(g)
-
-	// 3. Apply decay to uninvested sectors
-	for _, ps := range g.Players {
-		e.applyDecay(ps)
-	}
-
-	// 4. Clamp sector levels
-	for _, ps := range g.Players {
-		for _, ss := range ps.Sectors {
-			ss.Level = math.Max(MinSectorLevel, math.Min(MaxSectorLevel, ss.Level))
-		}
-	}
-
-	// 5. Update scores
-	for _, ps := range g.Players {
-		ps.Score = e.calcScore(ps)
-	}
-
-	// 6. Replenish resources
-	for _, ps := range g.Players {
-		e.replenishResources(ps)
-	}
-
-	// 7. Tick event durations and remove expired
-	activeEvents := make([]models.WorldEvent, 0)
-	for i := range g.ActiveEvents {
-		g.ActiveEvents[i].Duration--
-		if g.ActiveEvents[i].Duration > 0 {
-			activeEvents = append(activeEvents, g.ActiveEvents[i])
-		}
-	}
-	g.ActiveEvents = activeEvents
-
-	// 8. Generate new events (1-2 per turn)
-	newEventCount := 1
-	if e.eventGen.rng.Float64() < 0.5 {
-		newEventCount = 2
-	}
-	newEvents := e.eventGen.GenerateEvents(g, newEventCount)
-	g.ActiveEvents = append(g.ActiveEvents, newEvents...)
-	g.Events = append(g.Events, newEvents...)
-
-	// 9. Check win condition
-	var winner *models.PlayerState
-	for _, ps := range g.Players {
-		if ps.Score >= WinScore {
-			winner = ps
-			break
-		}
-	}
-
-	// 10. Advance turn
-	g.CurrentTurn++
-
-	// 11. Reset player readiness and actions
-	for _, ps := range g.Players {
-		ps.Player.Ready = false
-		ps.TurnActions = nil
-	}
-
-	// 12. Check end conditions
-	if winner != nil || (g.MaxTurns > 0 && g.CurrentTurn > g.MaxTurns) {
-		g.Phase = models.PhaseFinished
-		if winner == nil {
-			// Find highest score
-			var best *models.PlayerState
-			for _, ps := range g.Players {
-				if best == nil || ps.Score > best.Score {
-					best = ps
-				}
-			}
-			winner = best
-		}
-		log.Printf("[Engine] Game %s finished! Winner: %s (score: %.1f)", g.ID, winner.Player.Name, winner.Score)
+	// Broadcast new challenges individually.
+	for _, ch := range g.Challenges {
 		e.broadcast(g.ID, models.WSMessage{
-			Type: "game_over",
-			Payload: map[string]interface{}{
-				"winner_id":     winner.Player.ID,
-				"winner_name":   winner.Player.Name,
-				"winner_region": winner.Player.RegionID,
-				"score":         winner.Score,
-			},
+			Type:    "new_challenge",
+			Payload: ch,
 		})
 	}
 
-	// Broadcast updates
-	e.broadcastTurnResult(g)
-	e.broadcastGameState(g)
-	e.broadcastEvents(g, newEvents)
-}
-
-func (e *Engine) applyAllocations(ps *models.PlayerState) {
-	for _, action := range ps.TurnActions {
-		switch action.Type {
-		case models.ActionAllocate:
-			e.handleAllocate(ps, action)
-		case models.ActionPolicy:
-			e.handlePolicy(ps, action)
-		case models.ActionTrade:
-			// Trade handled separately between two players
-		case models.ActionRespondEvent:
-			e.handleEventResponse(ps, action)
-		}
-	}
-}
-
-func (e *Engine) handleAllocate(ps *models.PlayerState, action models.Action) {
-	// Data: {"sector": "economics", "amount": 20}
-	sectorStr, ok := action.Data["sector"].(string)
-	if !ok {
-		return
-	}
-	amount, ok := action.Data["amount"].(float64)
-	if !ok {
-		return
-	}
-
-	sector := models.SectorType(sectorStr)
-	ss, exists := ps.Sectors[sector]
-	if !exists {
-		return
-	}
-
-	if amount > ps.Player.Resources.Budget {
-		amount = ps.Player.Resources.Budget
-	}
-	if amount <= 0 {
-		return
-	}
-
-	ps.Player.Resources.Budget -= amount
-	ss.Investment += amount
-	ss.Level += amount * InvestmentRate * ss.Growth
-}
-
-func (e *Engine) handlePolicy(ps *models.PlayerState, action models.Action) {
-	// Data: {"policy": "increase_education_funding", "sector": "education"}
-	sectorStr, ok := action.Data["sector"].(string)
-	if !ok {
-		return
-	}
-	sector := models.SectorType(sectorStr)
-	ss, exists := ps.Sectors[sector]
-	if !exists {
-		return
-	}
-
-	// Policies cost influence but boost growth rate
-	cost := 10.0
-	if ps.Player.Resources.Influence < cost {
-		return
-	}
-	ps.Player.Resources.Influence -= cost
-	ss.Growth += 0.1
-}
-
-func (e *Engine) handleEventResponse(ps *models.PlayerState, action models.Action) {
-	// Data: {"event_id": "xxx", "response": "mitigate", "sector": "security"}
-	sectorStr, ok := action.Data["sector"].(string)
-	if !ok {
-		return
-	}
-	sector := models.SectorType(sectorStr)
-	ss, exists := ps.Sectors[sector]
-	if !exists {
-		return
-	}
-
-	// Responding to events costs stability but reduces negative impact
-	cost := 15.0
-	if ps.Player.Resources.Stability < cost {
-		return
-	}
-	ps.Player.Resources.Stability -= cost
-	ss.Level += 5 // partial recovery
-}
-
-func (e *Engine) applyActiveEvents(g *models.Game) {
-	for _, event := range g.ActiveEvents {
-		for _, ps := range g.Players {
-			// Skip if event is region-specific and not this player's region
-			if event.RegionSpecific != "" && event.RegionSpecific != ps.Player.RegionID {
-				continue
-			}
-
-			for sector, impact := range event.Impact {
-				ss, exists := ps.Sectors[sector]
-				if !exists {
-					continue
-				}
-				ss.Level += impact
-			}
-		}
-	}
-}
-
-func (e *Engine) applyDecay(ps *models.PlayerState) {
-	for _, ss := range ps.Sectors {
-		if ss.Investment == 0 {
-			ss.Level -= DecayRate
-		}
-		// Reset investment for next turn
-		ss.Investment = 0
-	}
-}
-
-func (e *Engine) replenishResources(ps *models.PlayerState) {
-	// Budget replenishes based on economics level
-	econ := ps.Sectors[models.Economics]
-	if econ != nil {
-		ps.Player.Resources.Budget += 30 + (econ.Level * 0.5)
-	}
-
-	// Influence replenishes based on politics level
-	pol := ps.Sectors[models.Politics]
-	if pol != nil {
-		ps.Player.Resources.Influence += 10 + (pol.Level * 0.2)
-	}
-
-	// Stability replenishes based on security level
-	sec := ps.Sectors[models.Security]
-	if sec != nil {
-		ps.Player.Resources.Stability += 10 + (sec.Level * 0.2)
-	}
-
-	// Knowledge replenishes based on education + R&D
-	edu := ps.Sectors[models.Education]
-	rnd := ps.Sectors[models.RandD]
-	if edu != nil && rnd != nil {
-		ps.Player.Resources.Knowledge += 5 + (edu.Level+rnd.Level)*0.15
-	}
-}
-
-func (e *Engine) calcScore(ps *models.PlayerState) float64 {
-	total := 0.0
-	for _, ss := range ps.Sectors {
-		total += ss.Level
-	}
-	return total // max 500 (5 sectors * 100)
+	log.Printf("[Engine] Game %s started week %d with %d challenges", g.ID, g.WeekNumber, len(g.Challenges))
+	return nil
 }
 
 func (e *Engine) broadcastGameState(g *models.Game) {
@@ -386,25 +204,7 @@ func (e *Engine) broadcastGameState(g *models.Game) {
 	})
 }
 
-func (e *Engine) broadcastEvents(g *models.Game, events []models.WorldEvent) {
-	for _, evt := range events {
-		e.broadcast(g.ID, models.WSMessage{
-			Type:    "event",
-			Payload: evt,
-		})
-	}
-}
-
-func (e *Engine) broadcastTurnResult(g *models.Game) {
-	scores := make(map[string]float64)
-	for pid, ps := range g.Players {
-		scores[pid] = ps.Score
-	}
-	e.broadcast(g.ID, models.WSMessage{
-		Type: "turn_result",
-		Payload: map[string]interface{}{
-			"turn":   g.CurrentTurn - 1,
-			"scores": scores,
-		},
-	})
+// generateProposalID creates a unique proposal ID.
+func generateProposalID(gameID, playerID string) string {
+	return "prop_" + gameID + "_" + playerID + "_" + time.Now().Format("150405.000")
 }

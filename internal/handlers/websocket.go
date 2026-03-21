@@ -16,14 +16,14 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 4096
+	maxMessageSize = 8192
 )
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // allow all origins
+		return true // allow all origins for the prototype
 	},
 }
 
@@ -40,12 +40,13 @@ type Client struct {
 type Hub struct {
 	mu          sync.RWMutex
 	clients     map[*Client]bool
-	gameClients map[string]map[*Client]bool // gameID -> clients
+	gameClients map[string]map[*Client]bool // gameID -> set of clients
 	register    chan *Client
 	unregister  chan *Client
 	gameManager *game.GameManager
 }
 
+// NewHub creates a new Hub.
 func NewHub(gm *game.GameManager) *Hub {
 	return &Hub{
 		clients:     make(map[*Client]bool),
@@ -56,6 +57,7 @@ func NewHub(gm *game.GameManager) *Hub {
 	}
 }
 
+// Run starts the hub's main event loop. Must be called as a goroutine.
 func (h *Hub) Run() {
 	for {
 		select {
@@ -86,7 +88,7 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 			log.Printf("[Hub] Client unregistered: player=%s game=%s", client.playerID, client.gameID)
 
-			// Broadcast player left
+			// Broadcast player left.
 			if client.gameID != "" {
 				h.BroadcastToGame(client.gameID, models.WSMessage{
 					Type: "player_left",
@@ -127,8 +129,6 @@ func (h *Hub) BroadcastToGame(gameID string, msg models.WSMessage) {
 }
 
 // HandleWebSocket upgrades an HTTP connection to WebSocket.
-// This uses the raw http.ResponseWriter and *http.Request so it works with
-// gorilla/websocket. The gin handler in main.go will extract them.
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -216,10 +216,8 @@ func (c *Client) handleMessage(raw []byte) {
 	switch msg.Type {
 	case "join_game":
 		c.handleJoinGame(msg.Payload)
-	case "player_action":
-		c.handlePlayerAction(msg.Payload)
-	case "ready":
-		c.handleReady()
+	case "submit_proposal":
+		c.handleSubmitProposal(msg.Payload)
 	case "chat":
 		c.handleChat(msg.Payload)
 	default:
@@ -242,7 +240,7 @@ func (c *Client) handleJoinGame(payload interface{}) {
 		return
 	}
 
-	// Verify game and player exist
+	// Verify game and player exist.
 	g, err := c.hub.gameManager.GetGame(gameID)
 	if err != nil {
 		c.sendError(err.Error())
@@ -259,23 +257,28 @@ func (c *Client) handleJoinGame(payload interface{}) {
 	c.hub.register <- c
 	c.hub.gameManager.SetPlayerConnected(gameID, playerID, true)
 
-	// Send current game state
+	// Send current game state to this client.
 	stateMsg, _ := json.Marshal(models.WSMessage{
 		Type:    "game_state",
 		Payload: g,
 	})
 	c.send <- stateMsg
 
-	// Broadcast player joined
+	// Broadcast player joined to all others.
+	playerName := ""
+	if p, exists := g.Players[playerID]; exists {
+		playerName = p.Name
+	}
 	c.hub.BroadcastToGame(gameID, models.WSMessage{
 		Type: "player_joined",
 		Payload: map[string]string{
-			"player_id": playerID,
+			"player_id":   playerID,
+			"player_name": playerName,
 		},
 	})
 }
 
-func (c *Client) handlePlayerAction(payload interface{}) {
+func (c *Client) handleSubmitProposal(payload interface{}) {
 	if c.gameID == "" || c.playerID == "" {
 		c.sendError("not joined to a game")
 		return
@@ -283,53 +286,33 @@ func (c *Client) handlePlayerAction(payload interface{}) {
 
 	data, ok := payload.(map[string]interface{})
 	if !ok {
-		c.sendError("invalid action payload")
+		c.sendError("invalid submit_proposal payload")
 		return
 	}
 
-	actionTypeStr, _ := data["type"].(string)
-	actionData, _ := data["data"].(map[string]interface{})
+	challengeID, _ := data["challenge_id"].(string)
+	description, _ := data["description"].(string)
+	pointsInvested, _ := data["points_invested"].(float64)
 
-	action := models.Action{
-		Type:     models.ActionType(actionTypeStr),
-		PlayerID: c.playerID,
-		Data:     actionData,
+	req := models.SubmitProposalRequest{
+		PlayerID:       c.playerID,
+		ChallengeID:    challengeID,
+		Description:    description,
+		PointsInvested: pointsInvested,
 	}
 
-	if err := c.hub.gameManager.SubmitAction(c.gameID, action); err != nil {
-		c.sendError(err.Error())
-		return
-	}
-
-	// Acknowledge
-	ack, _ := json.Marshal(models.WSMessage{
-		Type:    "action_ack",
-		Payload: map[string]string{"status": "ok"},
-	})
-	c.send <- ack
-}
-
-func (c *Client) handleReady() {
-	if c.gameID == "" || c.playerID == "" {
-		c.sendError("not joined to a game")
-		return
-	}
-
-	turnProcessed, err := c.hub.gameManager.SetPlayerReady(c.gameID, c.playerID)
+	proposal, err := c.hub.gameManager.SubmitProposal(c.gameID, req)
 	if err != nil {
 		c.sendError(err.Error())
 		return
 	}
 
-	if !turnProcessed {
-		// Just acknowledge readiness
-		ack, _ := json.Marshal(models.WSMessage{
-			Type:    "ready_ack",
-			Payload: map[string]string{"status": "waiting"},
-		})
-		c.send <- ack
-	}
-	// If turn was processed, the engine will broadcast updates via the hub
+	// Send acknowledgement back to submitter.
+	ack, _ := json.Marshal(models.WSMessage{
+		Type:    "proposal_submitted",
+		Payload: proposal,
+	})
+	c.send <- ack
 }
 
 func (c *Client) handleChat(payload interface{}) {
@@ -349,12 +332,12 @@ func (c *Client) handleChat(payload interface{}) {
 		return
 	}
 
-	// Look up player name from game state
+	// Look up player name.
 	playerName := ""
 	g, err := c.hub.gameManager.GetGame(c.gameID)
 	if err == nil {
-		if ps, exists := g.Players[c.playerID]; exists {
-			playerName = ps.Player.Name
+		if p, exists := g.Players[c.playerID]; exists {
+			playerName = p.Name
 		}
 	}
 
