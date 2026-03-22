@@ -118,12 +118,30 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
+	CREATE TABLE IF NOT EXISTS feed_items (
+		id SERIAL PRIMARY KEY,
+		tag VARCHAR(20) NOT NULL,
+		region_id VARCHAR(50) NOT NULL DEFAULT '',
+		title TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		source VARCHAR(50) NOT NULL DEFAULT 'rss',
+		feed_name VARCHAR(100) NOT NULL DEFAULT '',
+		published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		used_in_game BOOLEAN NOT NULL DEFAULT false,
+		UNIQUE(url, tag)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_players_game_id ON players(game_id);
 	CREATE INDEX IF NOT EXISTS idx_challenges_game_id ON challenges(game_id);
 	CREATE INDEX IF NOT EXISTS idx_proposals_game_id ON proposals(game_id);
 	CREATE INDEX IF NOT EXISTS idx_proposals_challenge_id ON proposals(challenge_id);
 	CREATE INDEX IF NOT EXISTS idx_chat_messages_game_id ON chat_messages(game_id);
 	CREATE INDEX IF NOT EXISTS idx_challenge_templates_tag ON challenge_templates(tag);
+	CREATE INDEX IF NOT EXISTS idx_feed_items_tag ON feed_items(tag);
+	CREATE INDEX IF NOT EXISTS idx_feed_items_region_id ON feed_items(region_id);
+	CREATE INDEX IF NOT EXISTS idx_feed_items_used ON feed_items(used_in_game);
 	`
 
 	if _, err := pool.Exec(ctx, schema); err != nil {

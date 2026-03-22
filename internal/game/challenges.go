@@ -174,56 +174,165 @@ func NewChallengeGenerator(s *store.Store) *ChallengeGenerator {
 	}
 }
 
-// GenerateChallenges creates challenges for a game. It queries challenge
-// templates from the database for each of the game's active tags, picks
-// countPerTag random templates, and customizes them with the game's region name.
+// GenerateChallenges creates challenges for a game. It first tries to use
+// real feed items from the database for each tag. If there aren't enough feed
+// items, it falls back to static challenge templates. This means games always
+// get fresh, real-world challenges when available.
 func (cg *ChallengeGenerator) GenerateChallenges(ctx context.Context, g *models.Game, countPerTag int) []models.Challenge {
 	challenges := make([]models.Challenge, 0)
 
 	for _, tag := range g.Tags {
-		templates, err := cg.store.GetChallengeTemplates(ctx, tag)
-		if err != nil {
-			log.Printf("[ChallengeGen] Error loading templates for tag %s: %v", tag, err)
-			continue
-		}
-		if len(templates) == 0 {
-			continue
-		}
+		feedChallenges := cg.generateFromFeeds(ctx, g, tag, countPerTag)
+		challenges = append(challenges, feedChallenges...)
 
-		// Shuffle and pick up to countPerTag unique templates.
-		perm := cg.rng.Perm(len(templates))
-		count := countPerTag
-		if count > len(templates) {
-			count = len(templates)
-		}
-
-		for i := 0; i < count; i++ {
-			tmpl := templates[perm[i]]
-			severity := 5 + cg.rng.Intn(6) // 5-10 range
-
-			title := tmpl.TitleTemplate
-			desc := tmpl.DescriptionTemplate
-			if strings.Contains(title, "%s") {
-				title = fmt.Sprintf(tmpl.TitleTemplate, g.RegionName)
-			}
-			if strings.Contains(desc, "%s") {
-				desc = fmt.Sprintf(tmpl.DescriptionTemplate, g.RegionName)
-			}
-
-			challenge := models.Challenge{
-				ID:          fmt.Sprintf("ch_%s_w%d_%s_%d", g.ID, g.WeekNumber, tag, i),
-				Tag:         tag,
-				Title:       title,
-				Description: desc,
-				Source:      tmpl.Source,
-				Region:      g.RegionName,
-				Severity:    severity,
-				CreatedAt:   time.Now(),
-				Active:      true,
-			}
-			challenges = append(challenges, challenge)
+		remaining := countPerTag - len(feedChallenges)
+		if remaining > 0 {
+			templateChallenges := cg.generateFromTemplates(ctx, g, tag, remaining, len(feedChallenges))
+			challenges = append(challenges, templateChallenges...)
 		}
 	}
 
 	return challenges
+}
+
+// generateFromFeeds creates challenges from real feed items stored in the database.
+func (cg *ChallengeGenerator) generateFromFeeds(ctx context.Context, g *models.Game, tag models.Tag, count int) []models.Challenge {
+	feedItems, err := cg.store.GetUnusedFeedItems(ctx, tag, g.RegionID, count)
+	if err != nil {
+		log.Printf("[ChallengeGen] Error loading feed items for tag %s: %v", tag, err)
+		return nil
+	}
+
+	var challenges []models.Challenge
+	for i, fi := range feedItems {
+		severity := cg.calculateSeverity(fi.Title, fi.Description)
+
+		challenge := models.Challenge{
+			ID:          fmt.Sprintf("ch_%s_w%d_%s_%d", g.ID, g.WeekNumber, tag, i),
+			Tag:         tag,
+			Title:       fi.Title,
+			Description: fi.Description,
+			Source:      fi.FeedName,
+			Region:      g.RegionName,
+			Severity:    severity,
+			CreatedAt:   time.Now(),
+			Active:      true,
+		}
+		challenges = append(challenges, challenge)
+
+		// Mark the feed item as used.
+		if err := cg.store.MarkFeedItemUsed(ctx, fi.ID); err != nil {
+			log.Printf("[ChallengeGen] Error marking feed item %d as used: %v", fi.ID, err)
+		}
+	}
+
+	if len(challenges) > 0 {
+		log.Printf("[ChallengeGen] Generated %d feed-based challenges for tag %s", len(challenges), tag)
+	}
+	return challenges
+}
+
+// generateFromTemplates creates challenges from static templates (fallback).
+func (cg *ChallengeGenerator) generateFromTemplates(ctx context.Context, g *models.Game, tag models.Tag, count int, offset int) []models.Challenge {
+	templates, err := cg.store.GetChallengeTemplates(ctx, tag)
+	if err != nil {
+		log.Printf("[ChallengeGen] Error loading templates for tag %s: %v", tag, err)
+		return nil
+	}
+	if len(templates) == 0 {
+		return nil
+	}
+
+	// Shuffle and pick up to count unique templates.
+	perm := cg.rng.Perm(len(templates))
+	if count > len(templates) {
+		count = len(templates)
+	}
+
+	var challenges []models.Challenge
+	for i := 0; i < count; i++ {
+		tmpl := templates[perm[i]]
+		severity := 5 + cg.rng.Intn(6) // 5-10 range
+
+		title := tmpl.TitleTemplate
+		desc := tmpl.DescriptionTemplate
+		if strings.Contains(title, "%s") {
+			title = fmt.Sprintf(tmpl.TitleTemplate, g.RegionName)
+		}
+		if strings.Contains(desc, "%s") {
+			desc = fmt.Sprintf(tmpl.DescriptionTemplate, g.RegionName)
+		}
+
+		challenge := models.Challenge{
+			ID:          fmt.Sprintf("ch_%s_w%d_%s_%d", g.ID, g.WeekNumber, tag, offset+i),
+			Tag:         tag,
+			Title:       title,
+			Description: desc,
+			Source:      tmpl.Source,
+			Region:      g.RegionName,
+			Severity:    severity,
+			CreatedAt:   time.Now(),
+			Active:      true,
+		}
+		challenges = append(challenges, challenge)
+	}
+
+	if len(challenges) > 0 {
+		log.Printf("[ChallengeGen] Generated %d template-based challenges for tag %s (fallback)", len(challenges), tag)
+	}
+	return challenges
+}
+
+// severityKeywords maps keywords to severity weight modifiers.
+var severityKeywords = map[string]int{
+	"crisis":    3,
+	"collapse":  3,
+	"war":       3,
+	"attack":    2,
+	"threat":    2,
+	"surge":     2,
+	"critical":  2,
+	"emergency": 3,
+	"breach":    2,
+	"scandal":   2,
+	"crash":     2,
+	"shortage":  1,
+	"risk":      1,
+	"concern":   1,
+	"decline":   1,
+	"reform":    0,
+	"growth":    -1,
+	"recovery":  -1,
+	"progress":  -1,
+}
+
+// calculateSeverity estimates severity (1-10) based on feed item content.
+func (cg *ChallengeGenerator) calculateSeverity(title, description string) int {
+	text := strings.ToLower(title + " " + description)
+	score := 5 // baseline
+
+	for keyword, weight := range severityKeywords {
+		if strings.Contains(text, keyword) {
+			score += weight
+		}
+	}
+
+	// Clamp to 1-10.
+	if score < 1 {
+		score = 1
+	}
+	if score > 10 {
+		score = 10
+	}
+
+	// Add a little randomness.
+	score += cg.rng.Intn(3) - 1 // -1, 0, or +1
+	if score < 1 {
+		score = 1
+	}
+	if score > 10 {
+		score = 10
+	}
+
+	return score
 }

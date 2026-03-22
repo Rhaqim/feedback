@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rhaqim/worldgame/internal/external"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/models"
 	"github.com/rhaqim/worldgame/internal/store"
@@ -15,11 +16,17 @@ import (
 type APIHandler struct {
 	gameManager *game.GameManager
 	store       *store.Store
+	feedService *external.FeedService
 }
 
 // NewAPIHandler creates a new APIHandler.
 func NewAPIHandler(gm *game.GameManager, s *store.Store) *APIHandler {
 	return &APIHandler{gameManager: gm, store: s}
+}
+
+// SetFeedService sets the feed service reference for feed-related endpoints.
+func (h *APIHandler) SetFeedService(fs *external.FeedService) {
+	h.feedService = fs
 }
 
 // POST /api/games -- Create a game.
@@ -299,5 +306,40 @@ func (h *APIHandler) ListChallengeTemplates(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"templates": templates,
+	})
+}
+
+// GET /api/feeds -- List recent feed items.
+func (h *APIHandler) ListFeedItems(c *gin.Context) {
+	ctx := context.Background()
+	items, err := h.store.GetRecentFeedItems(ctx, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load feed items"})
+		return
+	}
+	if items == nil {
+		items = []models.FeedItem{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"feed_items": items,
+	})
+}
+
+// POST /api/feeds/fetch -- Admin: trigger a manual feed fetch.
+func (h *APIHandler) TriggerFeedFetch(c *gin.Context) {
+	if h.feedService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "feed service not configured"})
+		return
+	}
+
+	ctx := context.Background()
+	count := h.feedService.FetchNow(ctx)
+
+	log.Printf("[API] Manual feed fetch triggered, stored %d items", count)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "fetched",
+		"count":  count,
 	})
 }

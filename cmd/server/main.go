@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/rhaqim/worldgame/internal/database"
+	"github.com/rhaqim/worldgame/internal/external"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/handlers"
 	"github.com/rhaqim/worldgame/internal/models"
@@ -67,7 +69,21 @@ func main() {
 	hub = handlers.NewHub(gameManager, s)
 	go hub.Run()
 
+	// Feed service: fetches real RSS feeds periodically.
+	feedSources := external.DefaultFeedSources()
+	feedFetcher := external.NewFeedFetcher(feedSources)
+	feedInterval := 30 * time.Minute
+	if envInterval := os.Getenv("FEED_INTERVAL"); envInterval != "" {
+		if d, err := time.ParseDuration(envInterval); err == nil {
+			feedInterval = d
+		}
+	}
+	feedService := external.NewFeedService(feedFetcher, s, feedInterval)
+	feedService.Start()
+	defer feedService.Stop()
+
 	apiHandler := handlers.NewAPIHandler(gameManager, s)
+	apiHandler.SetFeedService(feedService)
 
 	// Set up gin router.
 	r := gin.Default()
@@ -99,6 +115,10 @@ func main() {
 		api.POST("/regions", apiHandler.CreateRegion)
 		api.POST("/challenge-templates", apiHandler.CreateChallengeTemplate)
 		api.GET("/challenge-templates", apiHandler.ListChallengeTemplates)
+
+		// Feed routes
+		api.GET("/feeds", apiHandler.ListFeedItems)
+		api.POST("/feeds/fetch", apiHandler.TriggerFeedFetch)
 	}
 
 	// WebSocket endpoint.

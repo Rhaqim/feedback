@@ -158,6 +158,21 @@ type ChatMessage struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// FeedItem represents a news article or report fetched from an external feed.
+type FeedItem struct {
+	ID          int       `json:"id"`
+	Tag         Tag       `json:"tag"`
+	RegionID    string    `json:"region_id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	URL         string    `json:"url"`
+	Source      string    `json:"source"`    // "rss", "api"
+	FeedName    string    `json:"feed_name"` // e.g. "reuters", "bbc"
+	PublishedAt time.Time `json:"published_at"`
+	FetchedAt   time.Time `json:"fetched_at"`
+	UsedInGame  bool      `json:"used_in_game"`
+}
+
 // WSMessage is the envelope for all WebSocket communication.
 type WSMessage struct {
 	Type    string      `json:"type"`
