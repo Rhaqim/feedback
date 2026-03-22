@@ -1,22 +1,25 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 // APIHandler exposes REST endpoints for game management.
 type APIHandler struct {
 	gameManager *game.GameManager
+	store       *store.Store
 }
 
 // NewAPIHandler creates a new APIHandler.
-func NewAPIHandler(gm *game.GameManager) *APIHandler {
-	return &APIHandler{gameManager: gm}
+func NewAPIHandler(gm *game.GameManager, s *store.Store) *APIHandler {
+	return &APIHandler{gameManager: gm, store: s}
 }
 
 // POST /api/games -- Create a game.
@@ -205,9 +208,96 @@ func (h *APIHandler) NextWeek(c *gin.Context) {
 	})
 }
 
-// GET /api/regions -- List all available regions.
+// GET /api/regions -- List all available regions from the database.
 func (h *APIHandler) ListRegions(c *gin.Context) {
+	ctx := context.Background()
+	regions, err := h.store.GetAllRegions(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load regions"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"regions": game.AllRegions,
+		"regions": regions,
+	})
+}
+
+// GET /api/games/:id/chat -- Get chat history for a game.
+func (h *APIHandler) GetChat(c *gin.Context) {
+	ctx := context.Background()
+	gameID := c.Param("id")
+
+	messages, err := h.store.GetGameChat(ctx, gameID, 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load chat"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages,
+	})
+}
+
+// POST /api/regions -- Admin: add a new region.
+func (h *APIHandler) CreateRegion(c *gin.Context) {
+	ctx := context.Background()
+	var r models.Region
+	if err := c.ShouldBindJSON(&r); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if r.ID == "" || r.Name == "" || r.Country == "" || r.Continent == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id, name, country, and continent are required"})
+		return
+	}
+
+	if err := h.store.UpsertRegion(ctx, r); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create region"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"region": r})
+}
+
+// POST /api/challenge-templates -- Admin: add a challenge template.
+func (h *APIHandler) CreateChallengeTemplate(c *gin.Context) {
+	ctx := context.Background()
+	var t models.ChallengeTemplate
+	if err := c.ShouldBindJSON(&t); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if t.Tag == "" || t.TitleTemplate == "" || t.DescriptionTemplate == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tag, title_template, and description_template are required"})
+		return
+	}
+	if !models.IsValidTag(t.Tag) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tag"})
+		return
+	}
+	if t.Source == "" {
+		t.Source = "news"
+	}
+
+	if err := h.store.CreateChallengeTemplate(ctx, t); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create challenge template"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"template": t})
+}
+
+// GET /api/challenge-templates -- List all challenge templates.
+func (h *APIHandler) ListChallengeTemplates(c *gin.Context) {
+	ctx := context.Background()
+	templates, err := h.store.GetAllChallengeTemplates(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load challenge templates"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"templates": templates,
 	})
 }

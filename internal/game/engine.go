@@ -1,16 +1,18 @@
 package game
 
 import (
+	"context"
 	"log"
 	"time"
 
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 const (
-	WeekDuration       = 7 * 24 * time.Hour
+	WeekDuration        = 7 * 24 * time.Hour
 	InitialPlayerPoints = 100.0
-	ChallengesPerTag   = 3 // generate 2-3 per tag; we use 3 for the prototype
+	ChallengesPerTag    = 3 // generate 2-3 per tag; we use 3 for the prototype
 )
 
 // BroadcastFunc is called by the engine whenever it needs to push state to
@@ -23,36 +25,43 @@ type Engine struct {
 	challengeGen *ChallengeGenerator
 	evaluator    *Evaluator
 	broadcast    BroadcastFunc
+	store        *store.Store
 }
 
 // NewEngine creates a new Engine with the given challenge generator,
-// evaluator, and broadcast function.
-func NewEngine(challengeGen *ChallengeGenerator, evaluator *Evaluator, broadcast BroadcastFunc) *Engine {
+// evaluator, broadcast function, and store.
+func NewEngine(challengeGen *ChallengeGenerator, evaluator *Evaluator, broadcast BroadcastFunc, s *store.Store) *Engine {
 	return &Engine{
 		challengeGen: challengeGen,
 		evaluator:    evaluator,
 		broadcast:    broadcast,
+		store:        s,
 	}
 }
 
 // InitializeGame sets up a newly created game: generates initial challenges,
 // sets the week window, and moves the game to active phase.
-func (e *Engine) InitializeGame(g *models.Game) {
+func (e *Engine) InitializeGame(ctx context.Context, g *models.Game) {
 	now := time.Now()
 	g.Phase = models.PhaseActive
 	g.WeekNumber = 1
 	g.WeekStart = now
 	g.WeekEnd = now.Add(WeekDuration)
-	g.Challenges = e.challengeGen.GenerateChallenges(g, ChallengesPerTag)
+	g.Challenges = e.challengeGen.GenerateChallenges(ctx, g, ChallengesPerTag)
 	g.Proposals = []models.Proposal{}
 	g.Winner = nil
+
+	// Persist challenges to the database.
+	if err := e.store.CreateChallenges(ctx, g.ID, g.Challenges); err != nil {
+		log.Printf("[Engine] Error persisting challenges for game %s: %v", g.ID, err)
+	}
 
 	log.Printf("[Engine] Game %s initialized with %d challenges", g.ID, len(g.Challenges))
 }
 
 // SubmitProposal validates and records a player's proposal for a challenge.
 // It deducts the invested points from the player and broadcasts the proposal.
-func (e *Engine) SubmitProposal(g *models.Game, req models.SubmitProposalRequest) (*models.Proposal, error) {
+func (e *Engine) SubmitProposal(ctx context.Context, g *models.Game, req models.SubmitProposalRequest) (*models.Proposal, error) {
 	player, ok := g.Players[req.PlayerID]
 	if !ok {
 		return nil, errorf("player %s not found in game", req.PlayerID)
@@ -100,6 +109,14 @@ func (e *Engine) SubmitProposal(g *models.Game, req models.SubmitProposalRequest
 
 	g.Proposals = append(g.Proposals, proposal)
 
+	// Persist to database.
+	if err := e.store.CreateProposal(ctx, g.ID, proposal); err != nil {
+		log.Printf("[Engine] Error persisting proposal: %v", err)
+	}
+	if err := e.store.UpdatePlayerPoints(ctx, req.PlayerID, player.Points); err != nil {
+		log.Printf("[Engine] Error updating player points: %v", err)
+	}
+
 	// Broadcast the new proposal to all connected players.
 	e.broadcast(g.ID, models.WSMessage{
 		Type:    "proposal_submitted",
@@ -114,7 +131,7 @@ func (e *Engine) SubmitProposal(g *models.Game, req models.SubmitProposalRequest
 
 // Evaluate runs the AI evaluator on all proposals, determines the winner,
 // and transitions the game to the completed phase.
-func (e *Engine) Evaluate(g *models.Game, requestingPlayerID string) error {
+func (e *Engine) Evaluate(ctx context.Context, g *models.Game, requestingPlayerID string) error {
 	if g.HostID != requestingPlayerID {
 		return errorf("only the host can trigger evaluation")
 	}
@@ -127,14 +144,32 @@ func (e *Engine) Evaluate(g *models.Game, requestingPlayerID string) error {
 	winner := e.evaluator.EvaluateProposals(g)
 	g.Winner = winner
 
+	// Persist proposal scores to database.
+	for _, p := range g.Proposals {
+		if err := e.store.UpdateProposalScore(ctx, p.ID, p.AIScore, p.AIFeedback); err != nil {
+			log.Printf("[Engine] Error updating proposal score: %v", err)
+		}
+	}
+
 	// Add winning score to the winner's total.
 	if winner != nil {
 		if p, ok := g.Players[winner.PlayerID]; ok {
 			p.TotalScore += winner.Score
+			if err := e.store.UpdatePlayerTotalScore(ctx, winner.PlayerID, p.TotalScore); err != nil {
+				log.Printf("[Engine] Error updating winner total score: %v", err)
+			}
 		}
 	}
 
 	g.Phase = models.PhaseCompleted
+
+	// Persist game state.
+	if err := e.store.UpdateGamePhase(ctx, g.ID, g.Phase); err != nil {
+		log.Printf("[Engine] Error updating game phase: %v", err)
+	}
+	if err := e.store.UpdateGameWinner(ctx, g.ID, winner); err != nil {
+		log.Printf("[Engine] Error updating game winner: %v", err)
+	}
 
 	// Broadcast evaluation results.
 	e.broadcast(g.ID, models.WSMessage{
@@ -155,7 +190,7 @@ func (e *Engine) Evaluate(g *models.Game, requestingPlayerID string) error {
 // NextWeek resets the game for a new weekly cycle. The game must be in the
 // completed phase. Player points are reset, proposals cleared, new challenges
 // generated, and cumulative total_score is preserved.
-func (e *Engine) NextWeek(g *models.Game, requestingPlayerID string) error {
+func (e *Engine) NextWeek(ctx context.Context, g *models.Game, requestingPlayerID string) error {
 	if g.HostID != requestingPlayerID {
 		return errorf("only the host can start the next week")
 	}
@@ -180,7 +215,24 @@ func (e *Engine) NextWeek(g *models.Game, requestingPlayerID string) error {
 	g.Proposals = []models.Proposal{}
 
 	// Generate new challenges.
-	g.Challenges = e.challengeGen.GenerateChallenges(g, ChallengesPerTag)
+	g.Challenges = e.challengeGen.GenerateChallenges(ctx, g, ChallengesPerTag)
+
+	// Persist all changes to database.
+	if err := e.store.ResetPlayerPoints(ctx, g.ID, InitialPlayerPoints); err != nil {
+		log.Printf("[Engine] Error resetting player points: %v", err)
+	}
+	if err := e.store.ClearGameProposals(ctx, g.ID); err != nil {
+		log.Printf("[Engine] Error clearing proposals: %v", err)
+	}
+	if err := e.store.DeactivateGameChallenges(ctx, g.ID); err != nil {
+		log.Printf("[Engine] Error deactivating challenges: %v", err)
+	}
+	if err := e.store.CreateChallenges(ctx, g.ID, g.Challenges); err != nil {
+		log.Printf("[Engine] Error creating new challenges: %v", err)
+	}
+	if err := e.store.UpdateGameWeek(ctx, g); err != nil {
+		log.Printf("[Engine] Error updating game week: %v", err)
+	}
 
 	// Broadcast new state.
 	e.broadcastGameState(g)

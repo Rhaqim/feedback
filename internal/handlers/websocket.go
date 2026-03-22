@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 const (
@@ -44,16 +46,18 @@ type Hub struct {
 	register    chan *Client
 	unregister  chan *Client
 	gameManager *game.GameManager
+	store       *store.Store
 }
 
 // NewHub creates a new Hub.
-func NewHub(gm *game.GameManager) *Hub {
+func NewHub(gm *game.GameManager, s *store.Store) *Hub {
 	return &Hub{
 		clients:     make(map[*Client]bool),
 		gameClients: make(map[string]map[*Client]bool),
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		gameManager: gm,
+		store:       s,
 	}
 }
 
@@ -341,6 +345,7 @@ func (c *Client) handleChat(payload interface{}) {
 		}
 	}
 
+	// Broadcast to all connected players.
 	c.hub.BroadcastToGame(c.gameID, models.WSMessage{
 		Type: "chat",
 		Payload: map[string]interface{}{
@@ -350,6 +355,11 @@ func (c *Client) handleChat(payload interface{}) {
 			"timestamp":   time.Now().Unix(),
 		},
 	})
+
+	// Save to database.
+	if err := c.hub.store.CreateChatMessage(context.Background(), c.gameID, c.playerID, playerName, message); err != nil {
+		log.Printf("[Hub] Error saving chat message: %v", err)
+	}
 }
 
 func (c *Client) sendError(msg string) {

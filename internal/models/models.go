@@ -138,6 +138,26 @@ type SubmitProposalRequest struct {
 	PointsInvested float64 `json:"points_invested"`
 }
 
+// ChallengeTemplate holds a reusable challenge skeleton stored in the database.
+type ChallengeTemplate struct {
+	ID                  int       `json:"id"`
+	Tag                 Tag       `json:"tag"`
+	TitleTemplate       string    `json:"title_template"`
+	DescriptionTemplate string    `json:"description_template"`
+	Source              string    `json:"source"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// ChatMessage represents a persisted chat message in a game.
+type ChatMessage struct {
+	ID         int       `json:"id"`
+	GameID     string    `json:"game_id"`
+	PlayerID   string    `json:"player_id"`
+	PlayerName string    `json:"player_name"`
+	Message    string    `json:"message"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // WSMessage is the envelope for all WebSocket communication.
 type WSMessage struct {
 	Type    string      `json:"type"`

@@ -1,11 +1,13 @@
 package game
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 // errorf is a convenience wrapper around fmt.Errorf used throughout the
@@ -14,18 +16,18 @@ func errorf(format string, args ...interface{}) error {
 	return fmt.Errorf(format, args...)
 }
 
-// GameManager is the thread-safe in-memory store for all active games.
+// GameManager is the thread-safe game orchestrator backed by PostgreSQL.
 type GameManager struct {
 	mu     sync.RWMutex
-	games  map[string]*models.Game
+	store  *store.Store
 	engine *Engine
 	nextID int
 }
 
-// NewGameManager creates a new GameManager backed by the given engine.
-func NewGameManager(engine *Engine) *GameManager {
+// NewGameManager creates a new GameManager backed by the given engine and store.
+func NewGameManager(engine *Engine, s *store.Store) *GameManager {
 	return &GameManager{
-		games:  make(map[string]*models.Game),
+		store:  s,
 		engine: engine,
 	}
 }
@@ -38,9 +40,11 @@ func (gm *GameManager) generateID() string {
 // CreateGame creates a new game, generates initial challenges, and puts it
 // in the active phase. The creator does NOT automatically become a player.
 func (gm *GameManager) CreateGame(req models.CreateGameRequest) (*models.Game, error) {
-	// Validate region.
-	region := GetRegionByID(req.RegionID)
-	if region == nil {
+	ctx := context.Background()
+
+	// Validate region from the database.
+	region, err := gm.store.GetRegionByID(ctx, req.RegionID)
+	if err != nil || region == nil {
 		return nil, errorf("invalid region_id: %s", req.RegionID)
 	}
 
@@ -75,20 +79,27 @@ func (gm *GameManager) CreateGame(req models.CreateGameRequest) (*models.Game, e
 	}
 
 	// Engine sets up week timing, generates challenges, etc.
-	gm.engine.InitializeGame(g)
+	// Must be called before CreateGame to populate WeekStart/WeekEnd.
+	gm.engine.InitializeGame(ctx, g)
 
-	gm.games[gameID] = g
+	// Persist game to database.
+	if err := gm.store.CreateGame(ctx, g); err != nil {
+		return nil, errorf("failed to persist game: %v", err)
+	}
+
 	return g, nil
 }
 
 // JoinGame adds a player to an existing game. The first player to join
 // becomes the host. No region selection -- everyone plays in the game's region.
 func (gm *GameManager) JoinGame(gameID string, req models.JoinGameRequest) (*models.Game, string, error) {
+	ctx := context.Background()
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
+	game, err := gm.store.GetGame(ctx, gameID)
+	if err != nil {
 		return nil, "", errorf("game not found")
 	}
 
@@ -102,11 +113,19 @@ func (gm *GameManager) JoinGame(gameID string, req models.JoinGameRequest) (*mod
 		Connected:  false,
 	}
 
+	// Persist player to database.
+	if err := gm.store.CreatePlayer(ctx, gameID, player); err != nil {
+		return nil, "", errorf("failed to persist player: %v", err)
+	}
+
 	game.Players[playerID] = player
 
 	// First player to join becomes the host.
 	if game.HostID == "" {
 		game.HostID = playerID
+		if err := gm.store.UpdateGameHost(ctx, gameID, playerID); err != nil {
+			return nil, "", errorf("failed to set host: %v", err)
+		}
 	}
 
 	return game, playerID, nil
@@ -114,11 +133,13 @@ func (gm *GameManager) JoinGame(gameID string, req models.JoinGameRequest) (*mod
 
 // SubmitProposal delegates to the engine for proposal validation and recording.
 func (gm *GameManager) SubmitProposal(gameID string, req models.SubmitProposalRequest) (*models.Proposal, error) {
+	ctx := context.Background()
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
+	game, err := gm.store.GetGame(ctx, gameID)
+	if err != nil {
 		return nil, errorf("game not found")
 	}
 
@@ -126,20 +147,22 @@ func (gm *GameManager) SubmitProposal(gameID string, req models.SubmitProposalRe
 		return nil, errorf("game is not in active phase")
 	}
 
-	return gm.engine.SubmitProposal(game, req)
+	return gm.engine.SubmitProposal(ctx, game, req)
 }
 
 // Evaluate triggers AI evaluation for the game (host only).
 func (gm *GameManager) Evaluate(gameID, playerID string) (*models.Game, error) {
+	ctx := context.Background()
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
+	game, err := gm.store.GetGame(ctx, gameID)
+	if err != nil {
 		return nil, errorf("game not found")
 	}
 
-	if err := gm.engine.Evaluate(game, playerID); err != nil {
+	if err := gm.engine.Evaluate(ctx, game, playerID); err != nil {
 		return nil, err
 	}
 
@@ -148,15 +171,17 @@ func (gm *GameManager) Evaluate(gameID, playerID string) (*models.Game, error) {
 
 // NextWeek starts the next week cycle (host only).
 func (gm *GameManager) NextWeek(gameID, playerID string) (*models.Game, error) {
+	ctx := context.Background()
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
+	game, err := gm.store.GetGame(ctx, gameID)
+	if err != nil {
 		return nil, errorf("game not found")
 	}
 
-	if err := gm.engine.NextWeek(game, playerID); err != nil {
+	if err := gm.engine.NextWeek(ctx, game, playerID); err != nil {
 		return nil, err
 	}
 
@@ -165,11 +190,13 @@ func (gm *GameManager) NextWeek(gameID, playerID string) (*models.Game, error) {
 
 // GetGame returns a game by ID.
 func (gm *GameManager) GetGame(gameID string) (*models.Game, error) {
+	ctx := context.Background()
+
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
+	game, err := gm.store.GetGame(ctx, gameID)
+	if err != nil {
 		return nil, errorf("game not found")
 	}
 	return game, nil
@@ -177,39 +204,24 @@ func (gm *GameManager) GetGame(gameID string) (*models.Game, error) {
 
 // ListGames returns summaries of all games.
 func (gm *GameManager) ListGames() []models.GameSummary {
+	ctx := context.Background()
+
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
 
-	summaries := make([]models.GameSummary, 0, len(gm.games))
-	for _, g := range gm.games {
-		summaries = append(summaries, models.GameSummary{
-			ID:          g.ID,
-			Name:        g.Name,
-			RegionName:  g.RegionName,
-			Tags:        g.Tags,
-			Phase:       g.Phase,
-			PlayerCount: len(g.Players),
-			WeekNumber:  g.WeekNumber,
-			CreatedAt:   g.CreatedAt,
-		})
+	summaries, err := gm.store.ListGames(ctx)
+	if err != nil {
+		return []models.GameSummary{}
 	}
 	return summaries
 }
 
-// SetPlayerConnected updates a player's connected status.
+// SetPlayerConnected updates a player's connected status in the database.
 func (gm *GameManager) SetPlayerConnected(gameID, playerID string, connected bool) {
+	ctx := context.Background()
+
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
 
-	game, ok := gm.games[gameID]
-	if !ok {
-		return
-	}
-
-	player, ok := game.Players[playerID]
-	if !ok {
-		return
-	}
-
-	player.Connected = connected
+	_ = gm.store.SetPlayerConnected(ctx, playerID, connected)
 }

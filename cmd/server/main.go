@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/rhaqim/worldgame/internal/database"
 	"github.com/rhaqim/worldgame/internal/game"
 	"github.com/rhaqim/worldgame/internal/handlers"
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 func main() {
@@ -19,8 +23,32 @@ func main() {
 	log.Println("=== WorldGame Server ===")
 	log.Printf("Starting on port %d", *port)
 
+	ctx := context.Background()
+
+	// Database connection.
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://worldgame:worldgame@localhost:5432/worldgame?sslmode=disable"
+	}
+
+	pool, err := database.Connect(ctx, dbURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer pool.Close()
+
+	if err := database.Migrate(ctx, pool); err != nil {
+		log.Fatalf("Failed to migrate database: %v", err)
+	}
+
+	s := store.New(pool)
+
+	if err := database.Seed(ctx, s); err != nil {
+		log.Fatalf("Failed to seed database: %v", err)
+	}
+
 	// Initialize components.
-	challengeGen := game.NewChallengeGenerator()
+	challengeGen := game.NewChallengeGenerator(s)
 	evaluator := game.NewEvaluator()
 
 	// Hub will be set after we have the game manager.
@@ -33,13 +61,13 @@ func main() {
 		}
 	}
 
-	engine := game.NewEngine(challengeGen, evaluator, broadcastFn)
-	gameManager := game.NewGameManager(engine)
+	engine := game.NewEngine(challengeGen, evaluator, broadcastFn, s)
+	gameManager := game.NewGameManager(engine, s)
 
-	hub = handlers.NewHub(gameManager)
+	hub = handlers.NewHub(gameManager, s)
 	go hub.Run()
 
-	apiHandler := handlers.NewAPIHandler(gameManager)
+	apiHandler := handlers.NewAPIHandler(gameManager, s)
 
 	// Set up gin router.
 	r := gin.Default()
@@ -63,6 +91,14 @@ func main() {
 		api.POST("/games/:id/evaluate", apiHandler.Evaluate)
 		api.POST("/games/:id/next-week", apiHandler.NextWeek)
 		api.GET("/regions", apiHandler.ListRegions)
+
+		// Chat history
+		api.GET("/games/:id/chat", apiHandler.GetChat)
+
+		// Admin routes
+		api.POST("/regions", apiHandler.CreateRegion)
+		api.POST("/challenge-templates", apiHandler.CreateChallengeTemplate)
+		api.GET("/challenge-templates", apiHandler.ListChallengeTemplates)
 	}
 
 	// WebSocket endpoint.

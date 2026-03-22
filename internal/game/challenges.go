@@ -1,12 +1,15 @@
 package game
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/rhaqim/worldgame/internal/models"
+	"github.com/rhaqim/worldgame/internal/store"
 )
 
 // challengeTemplate holds a reusable challenge skeleton.
@@ -132,31 +135,62 @@ var challengePool = map[models.Tag][]challengeTemplate{
 	},
 }
 
-// ChallengeGenerator creates challenges for a game based on its tags and region.
-type ChallengeGenerator struct {
-	rng *rand.Rand
+// SeedTemplate is a challenge template entry exposed for database seeding.
+type SeedTemplate struct {
+	Title       string
+	Description string
+	Source      string
 }
 
-// NewChallengeGenerator creates a new ChallengeGenerator.
-func NewChallengeGenerator() *ChallengeGenerator {
+// GetChallengePoolForSeeding returns all hardcoded challenge templates
+// organized by tag, suitable for inserting into the database as seed data.
+func GetChallengePoolForSeeding() map[models.Tag][]SeedTemplate {
+	result := make(map[models.Tag][]SeedTemplate)
+	for tag, templates := range challengePool {
+		seeds := make([]SeedTemplate, len(templates))
+		for i, t := range templates {
+			seeds[i] = SeedTemplate{
+				Title:       t.TitleFmt,
+				Description: t.DescFmt,
+				Source:      t.Source,
+			}
+		}
+		result[tag] = seeds
+	}
+	return result
+}
+
+// ChallengeGenerator creates challenges for a game based on its tags and region.
+type ChallengeGenerator struct {
+	rng   *rand.Rand
+	store *store.Store
+}
+
+// NewChallengeGenerator creates a new ChallengeGenerator backed by the store.
+func NewChallengeGenerator(s *store.Store) *ChallengeGenerator {
 	return &ChallengeGenerator{
-		rng: rand.New(rand.NewSource(time.Now().UnixNano())),
+		rng:   rand.New(rand.NewSource(time.Now().UnixNano())),
+		store: s,
 	}
 }
 
-// GenerateChallenges creates challenges for a game. It produces countPerTag
-// challenges for each of the game's active tags, customized with the game's
-// region name.
-func (cg *ChallengeGenerator) GenerateChallenges(g *models.Game, countPerTag int) []models.Challenge {
+// GenerateChallenges creates challenges for a game. It queries challenge
+// templates from the database for each of the game's active tags, picks
+// countPerTag random templates, and customizes them with the game's region name.
+func (cg *ChallengeGenerator) GenerateChallenges(ctx context.Context, g *models.Game, countPerTag int) []models.Challenge {
 	challenges := make([]models.Challenge, 0)
 
 	for _, tag := range g.Tags {
-		templates, ok := challengePool[tag]
-		if !ok || len(templates) == 0 {
+		templates, err := cg.store.GetChallengeTemplates(ctx, tag)
+		if err != nil {
+			log.Printf("[ChallengeGen] Error loading templates for tag %s: %v", tag, err)
+			continue
+		}
+		if len(templates) == 0 {
 			continue
 		}
 
-		// Shuffle and pick up to countPerTag unique templates
+		// Shuffle and pick up to countPerTag unique templates.
 		perm := cg.rng.Perm(len(templates))
 		count := countPerTag
 		if count > len(templates) {
@@ -165,15 +199,15 @@ func (cg *ChallengeGenerator) GenerateChallenges(g *models.Game, countPerTag int
 
 		for i := 0; i < count; i++ {
 			tmpl := templates[perm[i]]
-			severity := tmpl.MinSeverity + cg.rng.Intn(tmpl.MaxSeverity-tmpl.MinSeverity+1)
+			severity := 5 + cg.rng.Intn(6) // 5-10 range
 
-			title := tmpl.TitleFmt
-			desc := tmpl.DescFmt
+			title := tmpl.TitleTemplate
+			desc := tmpl.DescriptionTemplate
 			if strings.Contains(title, "%s") {
-				title = fmt.Sprintf(tmpl.TitleFmt, g.RegionName)
+				title = fmt.Sprintf(tmpl.TitleTemplate, g.RegionName)
 			}
 			if strings.Contains(desc, "%s") {
-				desc = fmt.Sprintf(tmpl.DescFmt, g.RegionName)
+				desc = fmt.Sprintf(tmpl.DescriptionTemplate, g.RegionName)
 			}
 
 			challenge := models.Challenge{
