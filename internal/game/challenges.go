@@ -174,24 +174,70 @@ func NewChallengeGenerator(s *store.Store) *ChallengeGenerator {
 	}
 }
 
-// GenerateChallenges creates challenges for a game. It first tries to use
-// real feed items from the database for each tag. If there aren't enough feed
-// items, it falls back to static challenge templates. This means games always
-// get fresh, real-world challenges when available.
+// GenerateChallenges creates challenges for a game using a three-tier priority:
+// 1. Curated challenges from the Game Master (highest priority)
+// 2. Real feed items from the database
+// 3. Static challenge templates (fallback)
 func (cg *ChallengeGenerator) GenerateChallenges(ctx context.Context, g *models.Game, countPerTag int) []models.Challenge {
 	challenges := make([]models.Challenge, 0)
 
 	for _, tag := range g.Tags {
-		feedChallenges := cg.generateFromFeeds(ctx, g, tag, countPerTag)
+		// Priority 1: Curated challenges from Game Master.
+		curatedChallenges := cg.generateFromCurated(ctx, g, tag, countPerTag)
+		challenges = append(challenges, curatedChallenges...)
+
+		remaining := countPerTag - len(curatedChallenges)
+		if remaining <= 0 {
+			continue
+		}
+
+		// Priority 2: Raw feed items.
+		feedChallenges := cg.generateFromFeeds(ctx, g, tag, remaining)
 		challenges = append(challenges, feedChallenges...)
 
-		remaining := countPerTag - len(feedChallenges)
+		remaining -= len(feedChallenges)
 		if remaining > 0 {
-			templateChallenges := cg.generateFromTemplates(ctx, g, tag, remaining, len(feedChallenges))
+			// Priority 3: Static templates (fallback).
+			offset := len(curatedChallenges) + len(feedChallenges)
+			templateChallenges := cg.generateFromTemplates(ctx, g, tag, remaining, offset)
 			challenges = append(challenges, templateChallenges...)
 		}
 	}
 
+	return challenges
+}
+
+// generateFromCurated creates challenges from curated items approved by the Game Master.
+func (cg *ChallengeGenerator) generateFromCurated(ctx context.Context, g *models.Game, tag models.Tag, count int) []models.Challenge {
+	curatedItems, err := cg.store.GetUnusedCuratedChallenges(ctx, tag, g.RegionID, count)
+	if err != nil {
+		log.Printf("[ChallengeGen] Error loading curated challenges for tag %s: %v", tag, err)
+		return nil
+	}
+
+	var challenges []models.Challenge
+	for i, cc := range curatedItems {
+		challenge := models.Challenge{
+			ID:          fmt.Sprintf("ch_%s_w%d_%s_%d", g.ID, g.WeekNumber, tag, i),
+			Tag:         tag,
+			Title:       cc.Title,
+			Description: cc.Description,
+			Source:      cc.Source,
+			Region:      g.RegionName,
+			Severity:    cc.Severity,
+			CreatedAt:   time.Now(),
+			Active:      true,
+		}
+		challenges = append(challenges, challenge)
+
+		if err := cg.store.MarkCuratedChallengeUsed(ctx, cc.ID); err != nil {
+			log.Printf("[ChallengeGen] Error marking curated challenge %d as used: %v", cc.ID, err)
+		}
+	}
+
+	if len(challenges) > 0 {
+		log.Printf("[ChallengeGen] Generated %d curated challenges for tag %s", len(challenges), tag)
+	}
 	return challenges
 }
 

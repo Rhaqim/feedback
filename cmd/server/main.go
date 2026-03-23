@@ -119,6 +119,16 @@ func main() {
 		// Feed routes
 		api.GET("/feeds", apiHandler.ListFeedItems)
 		api.POST("/feeds/fetch", apiHandler.TriggerFeedFetch)
+
+		// Game Master routes
+		gm := api.Group("/game-master")
+		{
+			gm.GET("/feeds", apiHandler.GMListFeeds)
+			gm.POST("/curate", apiHandler.GMCurate)
+			gm.GET("/challenges", apiHandler.GMListChallenges)
+			gm.DELETE("/challenges/:id", apiHandler.GMDeleteChallenge)
+			gm.POST("/dismiss/:id", apiHandler.GMDismissFeed)
+		}
 	}
 
 	// WebSocket endpoint.

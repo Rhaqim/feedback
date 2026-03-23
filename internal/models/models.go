@@ -171,6 +171,35 @@ type FeedItem struct {
 	PublishedAt time.Time `json:"published_at"`
 	FetchedAt   time.Time `json:"fetched_at"`
 	UsedInGame  bool      `json:"used_in_game"`
+	Dismissed   bool      `json:"dismissed"`
+}
+
+// CuratedChallenge represents a challenge curated by the Game Master from a feed item.
+type CuratedChallenge struct {
+	ID           int       `json:"id"`
+	FeedItemID   *int      `json:"feed_item_id,omitempty"`
+	Tag          Tag       `json:"tag"`
+	RegionID     string    `json:"region_id"`
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	Source       string    `json:"source"`
+	Severity     int       `json:"severity"`
+	Active       bool      `json:"active"`
+	UsedInGame   bool      `json:"used_in_game"`
+	CuratorNotes string    `json:"curator_notes"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// CurateChallengeRequest is the body for POST /api/game-master/curate.
+type CurateChallengeRequest struct {
+	FeedItemID   *int   `json:"feed_item_id,omitempty"`
+	Tag          Tag    `json:"tag"`
+	RegionID     string `json:"region_id"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Source       string `json:"source"`
+	Severity     int    `json:"severity"`
+	CuratorNotes string `json:"curator_notes"`
 }
 
 // WSMessage is the envelope for all WebSocket communication.

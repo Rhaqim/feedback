@@ -130,7 +130,23 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		used_in_game BOOLEAN NOT NULL DEFAULT false,
+		dismissed BOOLEAN NOT NULL DEFAULT false,
 		UNIQUE(url, tag)
+	);
+
+	CREATE TABLE IF NOT EXISTS curated_challenges (
+		id SERIAL PRIMARY KEY,
+		feed_item_id INTEGER REFERENCES feed_items(id),
+		tag VARCHAR(20) NOT NULL,
+		region_id VARCHAR(50) NOT NULL DEFAULT '',
+		title TEXT NOT NULL,
+		description TEXT NOT NULL,
+		source VARCHAR(50) NOT NULL DEFAULT 'rss',
+		severity INTEGER NOT NULL DEFAULT 5,
+		active BOOLEAN NOT NULL DEFAULT true,
+		used_in_game BOOLEAN NOT NULL DEFAULT false,
+		curator_notes TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_players_game_id ON players(game_id);
@@ -142,11 +158,17 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	CREATE INDEX IF NOT EXISTS idx_feed_items_tag ON feed_items(tag);
 	CREATE INDEX IF NOT EXISTS idx_feed_items_region_id ON feed_items(region_id);
 	CREATE INDEX IF NOT EXISTS idx_feed_items_used ON feed_items(used_in_game);
+	CREATE INDEX IF NOT EXISTS idx_curated_challenges_tag ON curated_challenges(tag);
+	CREATE INDEX IF NOT EXISTS idx_curated_challenges_region ON curated_challenges(region_id);
+	CREATE INDEX IF NOT EXISTS idx_curated_challenges_used ON curated_challenges(used_in_game);
 	`
 
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+
+	// Add dismissed column to feed_items if it doesn't exist (for existing databases).
+	_, _ = pool.Exec(ctx, `ALTER TABLE feed_items ADD COLUMN IF NOT EXISTS dismissed BOOLEAN NOT NULL DEFAULT false`)
 
 	log.Println("[DB] Schema migration complete")
 	return nil

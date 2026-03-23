@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rhaqim/worldgame/internal/external"
@@ -342,4 +343,134 @@ func (h *APIHandler) TriggerFeedFetch(c *gin.Context) {
 		"status": "fetched",
 		"count":  count,
 	})
+}
+
+// ---------- Game Master Endpoints ----------
+
+// GET /api/game-master/feeds -- List feed items with filters for Game Master.
+func (h *APIHandler) GMListFeeds(c *gin.Context) {
+	ctx := context.Background()
+	tag := c.Query("tag")
+	regionID := c.Query("region_id")
+	unusedOnly := c.Query("unused") == "true"
+
+	items, err := h.store.GetFeedItemsFiltered(ctx, tag, regionID, unusedOnly, 100)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load feed items"})
+		return
+	}
+	if items == nil {
+		items = []models.FeedItem{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"feed_items": items})
+}
+
+// POST /api/game-master/curate -- Create a curated challenge from a feed item.
+func (h *APIHandler) GMCurate(c *gin.Context) {
+	ctx := context.Background()
+	var req models.CurateChallengeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if req.Title == "" || req.Description == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title and description are required"})
+		return
+	}
+	if !models.IsValidTag(req.Tag) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tag"})
+		return
+	}
+	if req.Severity < 1 || req.Severity > 10 {
+		req.Severity = 5
+	}
+	if req.Source == "" {
+		req.Source = "rss"
+	}
+
+	cc := models.CuratedChallenge{
+		FeedItemID:   req.FeedItemID,
+		Tag:          req.Tag,
+		RegionID:     req.RegionID,
+		Title:        req.Title,
+		Description:  req.Description,
+		Source:       req.Source,
+		Severity:     req.Severity,
+		Active:       true,
+		CuratorNotes: req.CuratorNotes,
+	}
+
+	id, err := h.store.CreateCuratedChallenge(ctx, cc)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create curated challenge"})
+		return
+	}
+	cc.ID = id
+
+	// Mark the source feed item as used if provided.
+	if req.FeedItemID != nil {
+		if err := h.store.MarkFeedItemUsed(ctx, *req.FeedItemID); err != nil {
+			log.Printf("[API] Error marking feed item %d as used: %v", *req.FeedItemID, err)
+		}
+	}
+
+	log.Printf("[API] Curated challenge created: %d (tag=%s, region=%s)", id, req.Tag, req.RegionID)
+
+	c.JSON(http.StatusCreated, gin.H{"curated_challenge": cc})
+}
+
+// GET /api/game-master/challenges -- List curated challenges.
+func (h *APIHandler) GMListChallenges(c *gin.Context) {
+	ctx := context.Background()
+	tag := c.Query("tag")
+	regionID := c.Query("region_id")
+
+	challenges, err := h.store.GetCuratedChallenges(ctx, tag, regionID, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load curated challenges"})
+		return
+	}
+	if challenges == nil {
+		challenges = []models.CuratedChallenge{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"curated_challenges": challenges})
+}
+
+// DELETE /api/game-master/challenges/:id -- Remove a curated challenge.
+func (h *APIHandler) GMDeleteChallenge(c *gin.Context) {
+	ctx := context.Background()
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid challenge ID"})
+		return
+	}
+
+	if err := h.store.DeleteCuratedChallenge(ctx, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete curated challenge"})
+		return
+	}
+
+	log.Printf("[API] Curated challenge %d deleted", id)
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// POST /api/game-master/dismiss/:id -- Dismiss a feed item as not relevant.
+func (h *APIHandler) GMDismissFeed(c *gin.Context) {
+	ctx := context.Background()
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid feed item ID"})
+		return
+	}
+
+	if err := h.store.DismissFeedItem(ctx, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to dismiss feed item"})
+		return
+	}
+
+	log.Printf("[API] Feed item %d dismissed", id)
+	c.JSON(http.StatusOK, gin.H{"status": "dismissed"})
 }
