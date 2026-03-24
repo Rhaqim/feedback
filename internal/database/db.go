@@ -90,6 +90,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		title TEXT NOT NULL,
 		description TEXT NOT NULL,
 		source VARCHAR(50) NOT NULL DEFAULT 'news',
+		source_url TEXT NOT NULL DEFAULT '',
 		region VARCHAR(100) NOT NULL,
 		severity INTEGER NOT NULL DEFAULT 5,
 		active BOOLEAN NOT NULL DEFAULT true,
@@ -142,6 +143,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		title TEXT NOT NULL,
 		description TEXT NOT NULL,
 		source VARCHAR(50) NOT NULL DEFAULT 'rss',
+		source_url TEXT NOT NULL DEFAULT '',
 		severity INTEGER NOT NULL DEFAULT 5,
 		active BOOLEAN NOT NULL DEFAULT true,
 		used_in_game BOOLEAN NOT NULL DEFAULT false,
@@ -169,6 +171,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 	// Add dismissed column to feed_items if it doesn't exist (for existing databases).
 	_, _ = pool.Exec(ctx, `ALTER TABLE feed_items ADD COLUMN IF NOT EXISTS dismissed BOOLEAN NOT NULL DEFAULT false`)
+
+	// Add source_url column to challenges if it doesn't exist (for existing databases).
+	_, _ = pool.Exec(ctx, `ALTER TABLE challenges ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT ''`)
+
+	// Add source_url column to curated_challenges if it doesn't exist (for existing databases).
+	_, _ = pool.Exec(ctx, `ALTER TABLE curated_challenges ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT ''`)
 
 	log.Println("[DB] Schema migration complete")
 	return nil

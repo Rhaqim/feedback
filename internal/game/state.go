@@ -188,18 +188,43 @@ func (gm *GameManager) NextWeek(gameID, playerID string) (*models.Game, error) {
 	return game, nil
 }
 
-// GetGame returns a game by ID.
+// GetGame returns a game by ID. If the game is in the active phase but has
+// no active challenges, it triggers challenge generation from the three-tier
+// pipeline (curated → feeds → templates) so the game always serves fresh
+// challenges.
 func (gm *GameManager) GetGame(gameID string) (*models.Game, error) {
 	ctx := context.Background()
 
-	gm.mu.RLock()
-	defer gm.mu.RUnlock()
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
 
 	game, err := gm.store.GetGame(ctx, gameID)
 	if err != nil {
 		return nil, errorf("game not found")
 	}
+
+	// If the game is active but has no active challenges, generate them.
+	if game.Phase == models.PhaseActive && countActive(game.Challenges) == 0 {
+		challenges := gm.engine.challengeGen.GenerateChallenges(ctx, game, ChallengesPerTag)
+		if len(challenges) > 0 {
+			if err := gm.store.CreateChallenges(ctx, game.ID, challenges); err == nil {
+				game.Challenges = challenges
+			}
+		}
+	}
+
 	return game, nil
+}
+
+// countActive returns the number of active challenges in a slice.
+func countActive(challenges []models.Challenge) int {
+	n := 0
+	for _, ch := range challenges {
+		if ch.Active {
+			n++
+		}
+	}
+	return n
 }
 
 // ListGames returns summaries of all games.

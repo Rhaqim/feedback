@@ -397,6 +397,7 @@ func (h *APIHandler) GMCurate(c *gin.Context) {
 		Title:        req.Title,
 		Description:  req.Description,
 		Source:       req.Source,
+		SourceURL:    req.SourceURL,
 		Severity:     req.Severity,
 		Active:       true,
 		CuratorNotes: req.CuratorNotes,

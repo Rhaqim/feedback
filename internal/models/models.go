@@ -60,6 +60,7 @@ type Challenge struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
 	Source      string    `json:"source"`     // "news", "social_media", "report"
+	SourceURL   string    `json:"source_url"` // link to the original article
 	Region      string    `json:"region"`     // region name
 	Severity    int       `json:"severity"`   // 1-10
 	CreatedAt   time.Time `json:"created_at"`
@@ -183,6 +184,7 @@ type CuratedChallenge struct {
 	Title        string    `json:"title"`
 	Description  string    `json:"description"`
 	Source       string    `json:"source"`
+	SourceURL    string    `json:"source_url"`
 	Severity     int       `json:"severity"`
 	Active       bool      `json:"active"`
 	UsedInGame   bool      `json:"used_in_game"`
@@ -198,6 +200,7 @@ type CurateChallengeRequest struct {
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	Source       string `json:"source"`
+	SourceURL    string `json:"source_url"`
 	Severity     int    `json:"severity"`
 	CuratorNotes string `json:"curator_notes"`
 }

@@ -110,7 +110,7 @@ func (s *Store) GetGame(ctx context.Context, id string) (*models.Game, error) {
 
 	// Load challenges.
 	challengeRows, err := s.pool.Query(ctx,
-		`SELECT id, tag, title, description, source, region, severity, active, created_at
+		`SELECT id, tag, title, description, source, source_url, region, severity, active, created_at
 		 FROM challenges WHERE game_id = $1 ORDER BY created_at`, id)
 	if err != nil {
 		return nil, fmt.Errorf("query challenges: %w", err)
@@ -119,7 +119,7 @@ func (s *Store) GetGame(ctx context.Context, id string) (*models.Game, error) {
 	for challengeRows.Next() {
 		var ch models.Challenge
 		if err := challengeRows.Scan(&ch.ID, &ch.Tag, &ch.Title, &ch.Description,
-			&ch.Source, &ch.Region, &ch.Severity, &ch.Active, &ch.CreatedAt); err != nil {
+			&ch.Source, &ch.SourceURL, &ch.Region, &ch.Severity, &ch.Active, &ch.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan challenge: %w", err)
 		}
 		g.Challenges = append(g.Challenges, ch)
